@@ -5,13 +5,12 @@ use warnings;
 
 TODO:
 
-* jump higher
-* right/left momentum
-* un-invert it back to not being callbacks but instead linear flow through
-* rework scrolling so that blocks don't move, but the viewport does
-* break blocks (of certain types)
-* load map of level from an ASCII map (block objects)
-* collision detection from tekroids.pl
+o. currently, Mario takes off like a rocket if he changes direction in mid air with jump held -- look for velocity table misuse?
+o. we're hoovering about five pixels above the ground
+o. need to use small mario graphic
+o. Player_Draw
+o. Player_CommonGroundAnims
+o. Player_DoSpecialTiles
 
 =cut
 
@@ -19,12 +18,14 @@ use SDL;
 use SDL::Rect;
 use SDL::Events;
 use Math::Trig;
-use Collision::2D ':all';
 use Data::Dumper;
 use SDLx::App;
 use SDLx::Controller::Interface;
 use SDLx::Sprite::Animated;
 use SDL::Joystick;
+use PeekPoke 'peek', 'poke';
+use B;
+use B::Generate;
 
 my $app = SDLx::App->new( w => 400, h => 400, dt => 0.02, title => 'Pario' );
 
@@ -69,167 +70,303 @@ $sprite->start();
 
 my $obj = SDLx::Controller::Interface->new( x => 10, y => 380, v_x => 0, v_y => 0 );
 
+my $map;  # ->[$x]->[$y]
+my $map_max_x = 0;
+my $map_max_y = 0;
+
 do {
-    # open my $fh, '<', 'level1.txt' or die;
-    
+    open my $fh, '<', 'level1.txt' or die;
+    my $y = 0;
+    while( my $line = readline $fh ) {
+        my @line = split m//, $line;
+        for my $x ( 0 .. $#line ) {
+            $map->[$x]->[$y] = $line[$x];
+            $map_max_x = $x if $x > $map_max_x;
+        }
+        $y++; 
+    }
+    $map_max_y = $y;
 };
 
-my @blocks = (
-    [ 19,  310 ],
-    [ 40,  310 ],
-    [ 30,  289 ],
-    [ 120, 380 ],
-    [ 141, 380 ],
-    [ 141, 359 ]
-);
-
-foreach ( ( 0 .. 2, 10 ... 15, 17 ... 25 ) ) {
-    push @blocks, [ $_ * 20 + $_ * 1, 380 ];
+sub map_x_y {
+    my $x = shift;
+    my $y = shift;
+    return $map->[$x]->[$y] || ' ';
 }
 
+my $a = 0;
+my $x = 0;
+my $y = 0;
+my $carry = 0;
+my @stack;
+
+my $PLAYER_TOPRUNSPEED    = 0x28;         # Highest X velocity when Player runs
+my $PLAYER_TOPPOWERSPEED  = 0x38;         # Highest X velocity hit when Player is at full "power"
+my $PLAYER_JUMP           = - 0x38;       # Player's root Y velocity for jumping (further adjusted a bit by Player_SpeedJumpInc)
+my $PLAYER_MAXSPEED       = 0x40;         # Player's maximum speed
+
+
+# Player_Suit -- Player's active powerup (see also: Player_QueueSuit)
+my $PLAYERSUIT_SMALL    = 0; 
+my $PLAYERSUIT_BIG      = 1;
+my $PLAYERSUIT_FIRE     = 2;
+my $PLAYERSUIT_RACCOON  = 3; 
+my $PLAYERSUIT_FROG     = 4;
+my $PLAYERSUIT_TANOOKI  = 5;
+my $PLAYERSUIT_HAMMER   = 6;
+my $PLAYERSUIT_SUPERSUITBEGIN = $PLAYERSUIT_FROG ;  # Marker for when "Super Suits" begin
+my $PLAYERSUIT_LAST     = $PLAYERSUIT_HAMMER ; 
+my $PLAYER_FLY_YVEL       = - 0x18;  # The Y velocity the Player flies at
+my $PLAYER_TAILWAG_YVEL    = 0x10;  # The Y velocity that the tail wag attempts to lock you at
+
+my $PF_JUMPFALLSMALL   = 0x40;   # Standard jump/fall frame when small
+my $PF_FASTJUMPFALLSMALL       = 0x4E;  # "Fast" jump/fall frame when small
+
+my $PAD_A       = 0x80;
+my $PAD_B       = 0x40;
+my $PAD_SELECT  = 0x20;                  
+my $PAD_START   = 0x10;
+my $PAD_UP      = 0x08;
+my $PAD_DOWN    = 0x04;
+my $PAD_LEFT    = 0x02;
+my $PAD_RIGHT   = 0x01;
+
+my $FALLRATE_MAX          = 0x40;         # Maximum Y velocity falling rate
+
+my $Player_XAccelMain = [
+    # This is the main value of X acceleration applied
+    # F = "Friction" (stopping rate), "N = "Normal" accel, S = "Skid" accel, X = unused
+    # Without B button  With B button  
+    #      F   N   S   X     F   N   S   X
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Small
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Big
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Fire
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Leaf
+          -1,  2,  2,  0,   -1,  2,  2,  0,  # Frog
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Tanooki
+          -1,  0,  2,  0,   -1,  0,  2,  0,  # Hammer
+];
+
+# Table of values that have to do with Player_UphillSpeedIdx override
+my $Player_UphillSpeedVals = [
+    0x00, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11, 0x10, 0x0F, 0x0E, 0x0D,
+];
+
+my $Player_XAccelPseudoFrac =  [
+    # F = "Friction" (stopping rate), "N = "Normal" accel, S = "Skid" accel, X = unused
+    # Without B button      With B button
+    #         F     N     S     X       F     N     S     X
+           0x60, 0xE0, 0x00, 0x00,   0x60, 0xE0, 0x00, 0x00,  # Small
+           0x20, 0xE0, 0x00, 0x00,   0x20, 0xE0, 0x00, 0x00,  # Big
+           0x20, 0xE0, 0x00, 0x00,   0x20, 0xE0, 0x00, 0x00,  # Fire
+           0x20, 0xE0, 0x00, 0x00,   0x20, 0xE0, 0x00, 0x00,  # Leaf
+           0x00, 0x00, 0x00, 0x00,   0x00, 0x00, 0x00, 0x00,  # Frog
+           0x60, 0xE0, 0x00, 0x00,   0x60, 0xE0, 0x00, 0x00,  # Tanooki
+           0x60, 0xE0, 0x00, 0x00,   0x60, 0xE0, 0x00, 0x00,  # Hammer
+];
+
+# This table grants a couple (dis)abilities to certain^M
+# power-ups; specifically:^M
+# Bit 0 (1) = Able to fly and flutter (Raccoon tail wagging)^M
+# Bit 1 (2) = NOT able to slide on slopes^M
+my $PowerUp_Ability = [
+    #   Small,    Big, Fire,   Leaf,  Frog, Tanooki,    Hammer
+         0x00,   0x00,  0x00,  0x01,  0x02,    0x01,     0x02,
+];
+
+# Based on how fast Player is running, the jump is
+# increased just a little (this is subtracted, thus
+# for the negative Y velocity, it's "more negative")
+my $Player_SpeedJumpInc = [    0x00, 0x02, 0x04, 0x08 ];
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+#; Player_JumpFlyFlutter
+#;
+#; Controls the acts of jumping, flying, and fluttering (tail wagging)
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+my $PRG008_AC22 = [ # XXX give this a better name
+     0xD0, 0xCE, 0xCC, 0xCA, 0xCA, 0xCA
+];
+
+#    ; Offsets used for tile detection in non-sloped levels
+#    ; +16 if moving downward
+#    ; +8 if on the right half of the tile
+my $TileAttrAndQuad_OffsFlat = [
+    #     Yoff Xoff
+
+    # Not small or ducking moving downward - Left half
+    0x20, 0x04,    # Ground left
+    0x20, 0x0B,    # Ground right
+    0x1B, 0x0E,    # In-front lower
+    0x0E, 0x0E,    # In-front upper
+
+    # Not small or ducking moving downward - Right half
+    0x20, 0x04,    # Ground left
+    0x20, 0x0B,    # Ground right
+    0x1B, 0x01,    # In-front lower
+    0x0E, 0x01,    # In-front upper
+
+    # Not small or ducking moving upward - Left half
+    0x06, 0x08,    # Ground left
+    0x06, 0x08,    # Ground right
+    0x1B, 0x0E,    # In-front lower
+    0x0E, 0x0E,    # In-front upper
+
+    # Not small or ducking moving upward - Right half
+    0x06, 0x08,    # Ground left
+    0x06, 0x08,    # Ground right
+    0x1B, 0x01,    # In-front lower
+    0x0E, 0x01,    # In-front upper
+
+    # my 0xTileAttrAndQuad_OffsFlat_Sm =...
+
+    # Small or ducking moving downward - Left half
+    0x20, 0x04,    # Ground left
+    0x20, 0x0B,    # Ground right
+    0x1B, 0x0D,    # In-front lower
+    0x14, 0x0D,    # In-front upper
+
+    # Small or ducking moving downward - Right half
+    0x20, 0x04,    # Ground left
+    0x20, 0x0B,    # Ground right
+    0x1B, 0x02,    # In-front lower
+    0x14, 0x02,    # In-front upper
+
+    # Small or ducking moving upward - Left half
+    0x10, 0x08,    # Ground left
+    0x10, 0x08,    # Ground right
+    0x1B, 0x0D,    # In-front lower
+    0x14, 0x0D,    # In-front upper
+
+    # Small or ducking moving upward - Right half
+    0x10, 0x08,    # Ground left
+    0x10, 0x08,    # Ground right
+    0x1B, 0x02,    # In-front lower
+    0x14, 0x02,    # In-front upper
+];
+
+my $PRG008_B3AC = [ # XXX give this a better name
+    0x02, 0x0E,  # Left/Right half, not small 
+    0x03, 0x0D,  # Left/Right half, small
+];
+
+my $Read_Joypads_UnkTable = [ 0x00, 0x01, 0x02, 0x00, 0x04, 0x05, 0x06, 0x04, 0x08, 0x09, 0x0A, 0x08, 0x00, 0x01, 0x02, 0x00 ];
+
 my $pressed                = {};      # some combination of left/right/up/down
-my $lockjump               = 0;       # has jumped, hasn't hit the ground yet
-my $vel_x                  = 100;     # X speed when walking/jumping
-my $vel_y                  = -102;    # Y (initial) speed when jumping
+#my $lockjump               = 0;       # has jumped, hasn't hit the ground yet
+#my $vel_x                  = 100;     # X speed when walking/jumping
+#my $vel_y                  = -102;    # Y (initial) speed when jumping
 my $quit                   = 0;
-my $gravity                = 160;     # gravitational constant; was 180
-my $gravity_delay          = 0;       # countdown, initialized from $gravity_delay_constant, before gravity kicks in for the current jump
-my $gravity_delay_constant = 120;
+#my $gravity                = 190;     # gravitational constant; was 180
+#my $gravity_delay          = 0;       # countdown, initialized from $gravity_delay_constant, before gravity kicks in for the current jump
+#my $gravity_delay_constant = 120;
 my $dashboard              = '';      # debug message to display on-screen
 my $w                      = 16;      # mario width
 my $h                      = 28;      # mario height (but not necessarily block height, which is/was 20)
 my $block_height           = 20;
-my $block_width            = 20;
-my $scroller               = 0;       # movement backlogged to recenter the screen
+#my $block_width            = 20;
+#my $scroller               = 0;       # movement backlogged to recenter the screen
 
-$obj->set_acceleration(
-    sub {
-        my $time  = shift;
-        my $state = shift;
-        $state->v_x(0);    # Don't move by default
-        my $ay = 0;        # Y acceleration
+my $Counter_1              = 0;       # This value simply increments every frame, used for timing various things
 
-        #
-        # controls and animation selection
-        #
+my $Player_InAir           = 0;      # When set, Player is in the air
+my $Player_InAir_OLD       = 0;
+my $Player_Slide           = 0;      # Positive values sliding forward, negative values sliding backward; directly sets Player_XVel
+my $Player_Kuribo          = 0;      # Set for Kuribo's Shoe active
+my $Player_KuriboDir       = 0;      # While Kuribo's shoe is moving: 0 - Not requesting move, 1 - move right, 2 - move left
+my $Player_RunFlag         = 0;      # Set while Player is actually considered "running" (holding down B and at enough speed; doesn't persist)
+my $Player_Power           = 0;      # >>>>>>[P] charge level ($7F max)
+my $Player_Slippery        = 0;      # 0 = Ground is not slippery, 1 = Ground is a little slippery, 2 = Ground is REALLY slippery
+my $Player_MoveLR          = 0;      # 0 - Not moving left/right, 1 - Moving left, 2 - Moving right (reversed from the pad input)
+my $Player_FlipBits        = 0;      # Set to $00 for Player to face left, Set to $40 for Player to face right;
+my $Player_FlipBits_OLD    = 0;
+my $Player_EndLevel        = 0;
+my $Player_VibeDisable     = 0;      # While greater than zero, Player is unable to move (from impact of heavy fellow)
+my $Player_Suit            = 0;      # Player's active powerup (see also: Player_QueueSuit)
+my $Player_InWater         = 0;      # Set for when in water (1 = Regular water specifically, other non-zero values indicate waterfall)
+my $Player_IsDucking       = 0;      # Set when Player is ducking down
+my $Player_SlideRate:      = 0;      # While Player is sliding, this is added to X Velocity (does not persist, however)
+my $Player_SwimCnt         = 0;      # Swim counter FIXME Describe better 0-3
+my $Player_AllowAirJump:   = 0;      # Counts down to zero, but while set, you can jump in the air
+my $Player_FlyTime         = 0;      # When > 0, Player can fly (for power ups that do so); decrements (unless $FF) to 0
+my $Player_Frame           = 0;      # Player display frame
+my $Player_StarInv         = 0;      # Starman Invincibility counter; full/fatal invincibility, counts down to zero
+my $Player_RootJumpVel     = $PLAYER_JUMP;
+my $Player_mGoomba         = 0;      # Player is caught by a micro Goomba (jump short)
+my $Player_WagCount        = 0;      # after wagging raccoon tail, until this hits zero, holding 'A' keeps your fall rate low
+my $Player_UphillFlag      = 0;      # When set, Player is walking uphill, and uses speed index value at Player_UphillSpeedIdx
+my $Player_UphillSpeedIdx  = 0;      # Override when Player_UphillFlag is set (shared with Player_Microgoomba)
+my $Player_XVelAdj         = 0;      # Applies additional value to the X Velocity
+my $Player_XVel            = 0;      # Player's X Velocity (negative values to the left) (max value is $38)
+my $Player_YVel            = 0;      # Player's Y Velocity (negative values upward)
+my $Player_X               = 50<<4;      # XXX initialize to something else    XXX contains the fractional 4 bits too
+my $Player_Y               = 100<<4;      # XXX contains the fractional 4 bits too
+# $Player_XVelFrac -- don't use
+# $Player_XHi -- don't use
+my $Player_IsHolding       = 0;      # Set when Player is holding something (animation effect only)
+my $Player_IsClimbing      = 0;      # Set when Player is climing vine
+my $Player_WalkAnimTicks   = 0;      # Ticks between animation frames of walking; max value varies by Player's X velocity
+my $Player_HitCeiling      = 0;      # Flag set when Player has just hit head off ceiling
+my $Kill_Tally             = 0;      # Counter that increases with each successful hit of an object without touching the ground
+my $Player_Current         = 0;      # Which Player is currently up (0 = Mario, 1 = Luigi)
 
-        if ( $pressed->{right} ) {
-            $state->v_x($vel_x);
-            if   ( $pressed->{up} ) { $sprite->sequence('jumpr') }
-            elsif ($sprite->sequence() ne 'right') { $sprite->sequence('right'); }
+# Player_Behind_En:
+# Specifies whether the "Behind the scenes" effect is actually active
+# If the Player has stepped out from behind the background, it can be
+# still active, but he won't get the effect of it!
+my $Player_Behind_En       = 0;
+my $Player_Behind          = 0;      # When non-zero, Player is "behind the scenes" (as by white block)
+my $Player_LowClearance    = 0;      # Set when Player is in a "low clearance" situation (big Mario in a single block high tunnel)
+my  $Level_PipeMove = 0; # see asm; long desc of how targets are encoded
 
-        }
-        elsif ( $sprite->sequence() eq 'right' and ! $pressed->{left} ) {
-            $sprite->sequence('stopr');
-        }
+my $Level_SlopeEn          = 0;      # If set, enables slope tiles (otherwise they're considered flat top-only solids)
 
-        if ( $pressed->{left} ) {
-            $state->v_x( -$vel_x );
-            if   ( $pressed->{up} ) { $sprite->sequence('jumpl') }
-            elsif ($sprite->sequence() ne 'left') { $sprite->sequence('left'); }
-        }
-        elsif ( $sprite->sequence() eq 'left' and ! $pressed->{right} ) {
-            $sprite->sequence('stopl');
-        }
+my $Level_Tile_Head        = 0;    # Tile at Player's head
+my $Level_Tile_GndL        = 0;    # Tile at Player's feet left
+my $Level_Tile_GndR        = 0;    # Tile at Player's feet right
+my $Level_Tile_InFL        = 0;    # Tile "in front" of Player ("lower", at feet)
+my $Level_Tile_InFU        = 0;    # Tile "in front" of Player ("upper", at face)
+my $Level_Tile_Array = [ \$Level_Tile_Head, \$Level_Tile_GndL, \$Level_Tile_GndR, \$Level_Tile_InFL, \$Level_Tile_InFU, ]; # sdw: using this instead for calls like this:  LDA Level_Tile_Head,X
+# my $Level_Tile_Quad = [ 0, 0, 0, 0 ];  # $0608-$060B Quadrant of tile for each of the positions above XXX; not sure I'm using quadrants to do tile attributes
 
-        if ( $pressed->{up} && ! $lockjump ) {
 
-            $sprite->sequence('jumpr')   if ( $sprite->sequence() =~ 'r'); # XXX
-            $sprite->sequence('jumpl')   if ( $sprite->sequence() =~ 'l'); # XXX
+my $Counter_Wiggly         = 0;      # "Wiggly" counter, provides rippled movement (like the airship rising durin g its intro)
 
-            $state->v_y($vel_y);
-            $gravity_delay = $gravity_delay_constant;
-            $lockjump = 1;
+my $Pad_Holding            = 0;      # Active player's inputs (i.e. 1P or 2P, whoever's playing) buttons being held in (continuous)
+my $Pad_Input              = 0;      # Active player's inputs (i.e. 1P or 2P, whoever's playing) buttons newly pressed only (one shot)
 
-        }
+my $Controller1Press       = 0;      # Player 1's controller "pressed this frame only" (see Controller1 for values)
+my $Controller1            = 0;      # Player 1's controller inputs -- R01 L02 D04 U08 S10 E20 B40 A80
 
-        #
-        # collision checks
-        #
+my $Temp_Var1              = 0;
+my $Temp_Var2              = 0;
+my $Temp_Var3              = 0;      # Player's current X Velocity; set at PRG008_A928, inside Player_Control
+my $Temp_Var10             = 0;
+my $Temp_Var11             = 0;
+my $Temp_Var12             = 0;
+my $Temp_Var14             = 0;      # Top run speed depending on Power
+my $Temp_Var15             = 0;
+my $Temp_Var16             = 0;
+my $Temp_VarNP0            = 0;      # A temporary not on page 0; sdw: also: If did not use "high" Y last call to Player_GetTileAndAttr
 
-        my $collision = check_collision( $state, \@blocks );
-        $dashboard = 'Collision = ' . Dumper $collision;
+#
 
-        if ( $collision != -1 && $collision->[0] eq 'x' ) {
-            my $block = $collision->[1];
+sub xgoto (*) {
+    my $label = shift;
+    warn "goto ``$label'' called at " . (caller)[2];
+    goto $label;
+}
 
-            #X-axis collision_check
-            if ( $state->v_x() > 0 ) {    #moving right
-                $state->x( $block->[0] - $block_width - 3 );    # set to edge of block XXX what is 3 for?
-            }
+# hacked up:
 
-            if ( $state->v_x() < 0 ) {                #moving left
-                $state->x( $block->[0] + 3 + $block_width );    # set to edge of block XXX what is 3 for?
-            }
-        }
-
-        # y-axis collision_check
-
-        if ( $state->v_y() < 0 ) {                    #moving up
-            if ( $collision != -1 && $collision->[0] eq 'y' ) {
-                my $block = $collision->[1];
-                $state->y( $block->[1] + $block_height + 3 );    # stop just below block
-                $state->v_y(0);                                  # momentum lost
-            }
-            else {
-                # apply gravity; continue jumping
-                if( $gravity_delay-- <= 0 ) {
-                    $ay = $gravity; 
-                }
-            }
-        }
-        else {
-            # moving along the ground 
-            # Y velocity zero or greater than zero
-            if ( $collision != -1 && $collision->[0] eq 'y' ) {
-                my $block = $collision->[1];
-                $state->y( $block->[1] - $h - 1 );  # hover one pixel over the block
-                $state->v_y(0);                     # Causes test again in next frame
-                $ay = 0;                            # no downward velocity
-                $lockjump = 0 if ! $pressed->{up};  # able to jump again
-                $sprite->sequence( 'stopr' ) if $sprite->sequence eq 'jumpr';
-                $sprite->sequence( 'stopl' ) if $sprite->sequence eq 'jumpl';
-            } 
-            else { 
-                # apply gravity; continue falling 
-                # XXXX need a terminal velocity
-                $ay = $gravity;
-            }
-        }
-
-        if ( $state->y + 10 > $app->h ) {
-            # fell off of the world
-            $quit = 1;
-        }
-
-        #
-        # re-center the screen
-        #
-
-        if ($scroller) {
-            my $dir = 0;
-            $scroller-- and $dir = +1 if $scroller > 0;
-            $scroller++ and $dir = -1 if $scroller < 0;
-
-            $state->x( $state->x() + $dir );
-
-            $_->[0] += $dir foreach (@blocks); # XXXXXXXXXX move frame of reference instead
-
-        }
-        else {
-            if ( $state->x() > $app->w - 100 ) {
-                $scroller = -5;
-            }
-            if ( $state->x() < 100 ) {
-                $scroller = 5;
-            }
-
-        }
-
-        # return ( $accel_x, $accel_y, $torque );
-        return ( 0, $ay, 0 );
-    }
+my %tile_properties = (
+    # solid bottom and solid sides are the same thing
+    ' ' => { solid_top => 0, solid_bottom => 0, },
+    'X' => { solid_top => 1, solid_bottom => 1, },
 );
+
+
+$obj->set_acceleration(sub { return ( 0, 0, 0); } ); # bitches if it doesn't have this
 
 #
 # read keyboard and joystick
@@ -241,6 +378,8 @@ $app->add_event_handler(
 
         my $key = $_[0]->key_sym;
         my $name = SDL::Events::get_key_name($key) if $key;
+        $name = 'A' if $name and $name eq 'a';
+        $name = 'B' if $name and $name eq 'b';
 
         if ( $_[0]->type == SDL_KEYDOWN ) {
             $pressed->{$name} = 1;
@@ -259,6 +398,14 @@ $app->add_event_handler(
                $pressed->{right} = 0;
                $pressed->{left} = 0;
            }
+           if( $_[0]->jaxis_axis == 4 and $_[0]->jaxis_value > 10000 ) {
+               $pressed->{down} = 1;
+           } elsif( $_[0]->jaxis_axis == 4 and $_[0]->jaxis_value < -10000 ) {
+               $pressed->{up} = 1;
+           } elsif( $_[0]->jaxis_axis == 4 and $_[0]->jaxis_value > -10000 and $_[0]->jaxis_value < 10000 ) {
+               $pressed->{down} = 0;
+               $pressed->{up} = 0;
+           }
         } elsif( $_[0]->type == SDL_JOYBALLMOTION ) {
             #warn "- Joystick trackball motion event structure";
         } elsif( $_[0]->type == SDL_JOYHATMOTION ) {
@@ -266,20 +413,216 @@ $app->add_event_handler(
         } elsif( $_[0]->type == SDL_JOYBUTTONDOWN and $_[0]->jbutton_button == 2 ) {
             # button 2 is B, button 1 is A
             # warn " - Joystick button event structure: button down: button ". $_[0]->jbutton_button;
-            $pressed->{up} = 1;
+            $pressed->{B} = 1;
         } elsif( $_[0]->type == SDL_JOYBUTTONUP and $_[0]->jbutton_button == 2 ) {
             # warn " - Joystick button event structure: button up: button ". $_[0]->jbutton_button;
-            $pressed->{up} = 0;
+            $pressed->{B} = 0;
+        } elsif( $_[0]->type == SDL_JOYBUTTONDOWN and $_[0]->jbutton_button == 1 ) {
+            # button 2 is B, button 1 is A
+            # warn " - Joystick button event structure: button down: button ". $_[0]->jbutton_button;
+            $pressed->{A} = 1;
+        } elsif( $_[0]->type == SDL_JOYBUTTONUP and $_[0]->jbutton_button == 1 ) {
+            # warn " - Joystick button event structure: button up: button ". $_[0]->jbutton_button;
+            $pressed->{A} = 0;
         }
+
     }
 );
 
+
+
 $app->add_show_handler(
     sub {
-        $app->draw_rect( [ 0, 0, $app->w, $app->h ], 0x0 );
-        $app->draw_rect( [ @$_, $block_width, $block_height ], 0xFF0000FF ) foreach @blocks; # XXX
 
-        SDL::GFX::Primitives::string_color( $app, $app->w/2-100, 0, $dashboard, 0xFF0000FF); # XXX debug
+        #
+        # controls and animation selection
+        #
+
+        # from Player_DoGameplay 
+        # Makes for "wobbly" raising of the airship at least..
+        $Counter_Wiggly = ( $Counter_Wiggly & 0xf0 ) - 0x90;  $Counter_Wiggly += 256 if $Counter_Wiggly < 0;  # hacked up
+        $Counter_1++; $Counter_1 = 0 if $Counter_1 == 256; # happens in PRG031_F567; hacked up
+
+        #
+        # Player_Update() and Player_Control() are both called by Player_DoGameplay(); Player_Update() calls Player_DetectSolids()
+        #
+
+        # Level_MainLoop (PRG/prg030.asm)
+        # +- Player_DoGameplay (PRG/prg008.asm)
+        #    +- Player_Control (PRG/prg008.asm)
+        #    |  +- GndMov_Small (PRG/prg008.asm)
+        #    |    +- Player_GroundHControl (PRG/prg008.asm)
+        #    +- Player_Update (PRG/prg008.asm)
+        #       +- Player_DetectSolids (PRG/prg008.asm)
+
+        #
+        #
+        #
+
+        Read_Joypads();
+
+        Player_Control();  
+
+        Player_DetectSolids();
+
+warn "Player_InAir $Player_InAir Player_MoveLR $Player_MoveLR Player_XVel $Player_XVel Player_YVel $Player_YVel " .
+     " Player_HitCeiling $Player_HitCeiling Player_LowClearance $Player_LowClearance\n";
+warn "Pad_Input $Pad_Input Pad_Holding $Pad_Holding\n";
+
+
+        #
+        #
+        #
+
+#use Enbugger;
+#use Devel::Trace;
+$Devel::Trace::TRACE = 1;
+
+      # was in Player_Control:
+      #  $Temp_Var3 = abs($Player_XVel); # hacked up XXX
+
+      #  $state->v_x($Player_XVel); # XXX hacked up
+      #  $Player_MoveLR = 1 if $Player_XVel < 0;
+      #  $Player_MoveLR = 2 if $Player_XVel > 0;
+
+        if ( $pressed->{right} ) {
+            # $state->v_x($vel_x); # XXX Player_Control
+            if   ( $pressed->{up} ) { $sprite->sequence('jumpr') }
+            elsif ($sprite->sequence() ne 'right') { $sprite->sequence('right'); }
+
+        }
+        elsif ( $sprite->sequence() eq 'right' and ! $pressed->{left} ) {
+            $sprite->sequence('stopr');
+        }
+
+        if ( $pressed->{left} ) {
+            # $state->v_x( -$vel_x ); # XXX Player_Control
+            if   ( $pressed->{up} ) { $sprite->sequence('jumpl') }
+            elsif ($sprite->sequence() ne 'left') { $sprite->sequence('left'); }
+        }
+        elsif ( $sprite->sequence() eq 'left' and ! $pressed->{right} ) {
+            $sprite->sequence('stopl');
+        }
+
+        # if ( $pressed->{up} && ! $lockjump ) 
+        if ( $pressed->{up} ) {
+
+            $sprite->sequence('jumpr')   if ( $sprite->sequence() =~ 'r'); # XXX
+            $sprite->sequence('jumpl')   if ( $sprite->sequence() =~ 'l'); # XXX
+
+            # $state->v_y($vel_y);
+            # $gravity_delay = $gravity_delay_constant;
+            # $lockjump = 1;
+
+        }
+
+        #
+        # collision checks
+        #
+
+#        my $collision = check_collision( $state, \@blocks );
+#        $dashboard = 'Collision = ' . Dumper $collision;
+#
+#        if ( $collision != -1 && $collision->[0] eq 'x' ) {
+#            my $block = $collision->[1];
+#
+#            #X-axis collision_check
+#            if ( $state->v_x() > 0 ) {    #moving right
+#                $state->x( $block->[0] - $block_width - 3 );    # set to edge of block XXX what is 3 for?
+#            }
+#
+#            if ( $state->v_x() < 0 ) {                #moving left
+#                $state->x( $block->[0] + 3 + $block_width );    # set to edge of block XXX what is 3 for?
+#            }
+#        }
+
+        # y-axis collision_check
+
+#        if ( $state->v_y() < 0 ) {                    #moving up
+#            if ( $collision != -1 && $collision->[0] eq 'y' ) {
+#                my $block = $collision->[1];
+#                $state->y( $block->[1] + $block_height + 3 );    # stop just below block
+#                $state->v_y(0);                                  # momentum lost
+#            }
+#            else {
+#                # apply gravity; continue jumping
+#                if( $gravity_delay-- <= 0 or ! $pressed->{up} ) {
+#                    $ay = $gravity; 
+#                }
+#            }
+#        }
+#        else {
+#            # moving along the ground 
+#            # Y velocity zero or greater than zero
+#            if ( $collision != -1 && $collision->[0] eq 'y' ) {
+#                my $block = $collision->[1];
+#                $state->y( $block->[1] - $h - 1 );  # hover one pixel over the block
+#                $state->v_y(0);                     # Causes test again in next frame
+#                $ay = 0;                            # no downward velocity
+#                $lockjump = 0 if ! $pressed->{up};  # able to jump again
+#                $sprite->sequence( 'stopr' ) if $sprite->sequence eq 'jumpr';
+#                $sprite->sequence( 'stopl' ) if $sprite->sequence eq 'jumpl';
+#            } 
+#            else { 
+#                # apply gravity; continue falling 
+#                # XXXX need a terminal velocity
+#                $ay = $gravity;
+#            }
+#        }
+
+        if ( ($Player_Y>>4) + 10 > $app->h ) {
+            # fell off of the world
+            warn "player fell off of the world";
+            $quit = 1;
+        }
+
+        #
+        # re-center the screen
+        #
+
+#        if ($scroller) {
+#            my $dir = 0;
+#            $scroller-- and $dir = +1 if $scroller > 0;
+#            $scroller++ and $dir = -1 if $scroller < 0;
+#
+#            $state->x( $state->x() + $dir );
+#
+#            $_->[0] += $dir foreach (@blocks); # XXXXXXXXXX move frame of reference instead
+#
+#        }
+#        else {
+#            if ( $state->x() > $app->w - 100 ) {
+#                $scroller = -5;
+#            }
+#            if ( $state->x() < 100 ) {
+#                $scroller = 5;
+#            }
+#
+#        }
+
+
+        #
+        # draw
+        #
+
+        $app->draw_rect( [ 0, 0, $app->w, $app->h ], 0x0 );  # clear the screen
+
+        # warn "Player_X shifted: @{[ $Player_X >> 4 ]} Player_Y shifted: @{[ $Player_Y >> 4 ]}";
+        $sprite->x( $Player_X >> 4 );
+        $sprite->y( $Player_Y >> 4 );
+        $sprite->draw($app->surface);
+
+        for my $x ( 0 .. $map_max_x ) {
+            next if $x * $w > $app->w;
+            for my $y ( 0 .. $map_max_y ) {
+                next if $y * $w > $app->h;
+                # $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if $map->[$x]->[$y] eq 'X'; # XXX using width as height
+                $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if map_x_y($x, $y) eq 'X'; # XXX using width as height; but tiles are 16 pixels
+            }
+        }
+
+        SDL::GFX::Primitives::string_color( $app, $app->w/2-100, 0, $dashboard, 0xFF0000FF); # debug
+
         SDL::GFX::Primitives::string_color(
             $app,
             $app->w / 2 - 100,
@@ -294,585 +637,1927 @@ $app->add_show_handler(
 # render objects
 #
 
-$obj->attach( $app, sub {
-
-    my $state = shift;
-    my $c_rect = SDL::Rect->new( $state->x, $state->y, 16, 28 );
-    $sprite->x( $state->x );
-    $sprite->y( $state->y );
-    $sprite->draw($app->surface);
-    #$app->draw_rect( [  $state->x, $state->y, 16, 28   ], 0xFF00FFFF );
-
-} );
-
 $app->add_show_handler( sub { $app->update(); } );
 
 $app->run();
 
-sub check_collision {
-    my ( $mario, $blocks ) = @_;
+#sub check_collision {
+#    my ( $mario, $blocks ) = @_;
+#
+#    my @collisions = ();
+#
+#    foreach (@$blocks) {
+#        my $hash = {
+#            x  => $mario->x,
+#            y  => $mario->y,
+#            w  => $w,
+#            h  => $h,
+#            xv => $mario->v_x * 0.02,
+#            yv => $mario->v_y * 0.02
+#        };
+#        my $rect  = hash2rect($hash);
+#        my $bhash = { x => $_->[0], y => $_->[1], w => $w, h => $block_height };
+#        my $block = hash2rect($bhash);
+#        my $c = dynamic_collision( $rect, $block, interval => 1, keep_order => 1 );
+#        if ($c) {
+#
+#            my $axis = $c->axis() || 'y';
+#
+#            return [ $axis, $_ ];
+#
+#        }
+#
+#    }
+#
+#    return -1;
+#
+#}
 
-    my @collisions = ();
+sub Player_Control {
 
-    foreach (@$blocks) {
-        my $hash = {
-            x  => $mario->x,
-            y  => $mario->y,
-            w  => $w,
-            h  => $h,
-            xv => $mario->v_x * 0.02,
-            yv => $mario->v_y * 0.02
-        };
-        my $rect  = hash2rect($hash);
-        my $bhash = { x => $_->[0], y => $_->[1], w => $w, h => $block_height };
-        my $block = hash2rect($bhash);
-        my $c = dynamic_collision( $rect, $block, interval => 1, keep_order => 1 );
-        if ($c) {
+        # ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+        # ; Player_Control
+        # ;
+        # ; Pretty much all controllable Player actions like ducking,
+        # ; sliding, tile detection response, doors, vine climbing, and 
+        # ; including basic power-up / suit functionality (except the actual 
+        # ; throwing of fireballs / hammers for some reason!)
+        # ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+      Player_Control:
+        $Player_FlipBits_OLD = $Player_FlipBits;
+        $Player_InAir_OLD = $Player_InAir;
+        goto PRG008_A6D2 if $Player_EndLevel;          # If Player is running off at the end of the level, jump to PRG008_A6D2
+        goto PRG008_A6DA if $Player_VibeDisable == 0;  # If Player is not "vibrationally disabled", jump to PRG008_A6DA
+        $Player_VibeDisable--;
+      PRG008_A6D2:
+        # Remove horizontal velocity and cancel controller inputs
+        $Player_XVel = $Pad_Holding = $Pad_Input = 0;
 
-            my $axis = $c->axis() || 'y';
+      PRG008_A6DA:
+        goto PRG008_A6E5 if $Player_Slide == 0;        # If Player is NOT sliding down slope, jump to PRG008_A6E5
+        $Pad_Input &= ~ $PAD_B;                        # Otherwise (sdw: if player is sliding), disable 'B' button; sdw: AND #~PAD_B
 
-            return [ $axis, $_ ];
+      PRG008_A6E5:
+        # LDA Level_Objects+1
+        # CMP #OBJ_TOADANDKING
+        # BNE PRG008_A6F2         ; If first object is not "Toad and the King" (i.e. we're in the end of world castle), jump to PRG008_A6F2
+        # LDA <Pad_Holding
+        # AND #~(PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN)
+        # STA <Pad_Holding    ; Otherwise, disable all directional inputs
+      # PRG008_A6F2:
+        $y = $Player_Suit;
+        goto PRG008_A70E if $y == 0;         # If Player is small, jump to PRG008_A70E
+        goto PRG008_A70E if $y == $PLAYERSUIT_FROG; # If Player is Frog, jump to PRG008_A70E
+        $a = $Player_IsHolding | $Player_Slide | $Player_Kuribo;
+        goto PRG008_A70E if $a != 0; # If Player is holding something, sliding down a slope, or in a Kuribo's shoe, jump to PRG008_A70E 
+        $a = $Player_InAir;
+        goto PRG008_A71C if $a == 0; # If Player is NOT mid air, jump to PRG008_A71C
+        $a = $Player_InWater;
+        goto PRG008_A715 if $a == 0; # If Player is NOT in water, jump to PRG008_A715
 
-        }
+      PRG008_A70E:
+        # Forcefully disable any ducking
+        $Player_IsDucking = 0;
+        goto PRG008_A736;            # Jump (technically always) to PRG008_A736
 
-    }
+      PRG008_A715:
+        $a = $Player_IsDucking;
+        goto PRG008_A733 if $a != 0;   # If Player is ducking down, jump to PRG008_A733
+        goto PRG008_A736 if $a == 0;   # Otherwise, jump to PRG008_A736
 
-    return -1;
+      PRG008_A71C:
+        $Player_IsDucking = 0;
+        $a = $Level_SlopeEn;
+        goto PRG008_A72B if $a == 0;   # If slopes are not enabled, jump to PRG008_A72B
+        $a = $Player_SlideRate; 
+        goto PRG008_A736 if $a != 0;   # If Player has a slide magnitude, jump to PRG008_A736
+
+      PRG008_A72B:
+        $a = $Pad_Holding;
+        $a &= ($PAD_LEFT | $PAD_RIGHT | $PAD_UP | $PAD_DOWN);
+        goto PRG008_A736 if $a != $PAD_DOWN;  # If Player is not just holding down, jump to PRG008_A736
+
+      PRG008_A733:
+        $Player_IsDucking = $y; # Set ducking flag (uses non-zero suit value); sdw: from $y = $Player_Suit; player not ducking unless not small
+
+      PRG008_A736:
+        $y = 20;                       # Y = 20 (ducking or small)
+        $a = $Player_Suit;
+        goto PRG008_A743 if $a == 0;   # If Player is small, jump to PRG008_A743
+        $a = $Player_IsDucking;
+        goto PRG008_A743 if $a != 0;   # If Player is ducking, jump to PRG008_A743
+        $y = 10;                       # Otherwise, Y = 10 (not ducking, not small)
+
+      PRG008_A743:
+        $Temp_Var10 = $y;              # Temp_Var10 (Y offset) = 20 or 10
+        $a = 0x08;
+        $Temp_Var11 = $a;              # Temp_Var11 (X offset) = 8
+        Player_GetTileAndSlope();      # Get tile above Player XXXXXXXXXXXXX
+        $Level_Tile_Head = $a;         # -> Level_Tile_Head 
+        $Temp_Var1 = $a;               # -> Temp_Var1
+        $Temp_Var2 = $Level_Tile_GndL; # Get left ground tilee -> Temp_Var2 # 
+        $a = $Player_Behind_En = $Player_Behind;  # Default enable with being behind the scenes
+        goto PRG008_A77E if $a == 0;   # If Player is not behind the scenes, jump to PRG008_A77E
+        $a = $Counter_1;
+        $carry = $a & 0x01;
+        goto PRG008_A766 if ! $carry;  # Every other tick, jump to PRG008_A766
+        $Player_Behind--;
+
+      PRG008_A766:
+        $y = 0;                        # Y = 0 (disable "behind the scenes")
+        # If tile behind Player's head is $41 or TILE1_SKY, jump to PRG008_A77B
+        $a = $Temp_Var1;
+        goto PRG008_A77B if $a == 0x41;           # XXX white tile?  what?
+        # goto PRG008_A77B if $a == $TILE1_SKY;   # XXX pull in constants for these?  or do something else?
+        $y++;                                     # Y = 1 (enable "behind the scenes")
+        $a = $Player_Behind;
+        goto PRG008_A77B if $a != 0;              # If Player is behind the scenes, jump to PRG008_A77B
+        $Player_Behind = $y;                      # Set Player as behind the scenes
+
+      PRG008_A77B:
+        $Player_Behind_En = $y;                   # Store whether Player is actually behind scenery
+
+      PRG008_A77E:
+        $a = $Temp_Var1;                          # sdw: came from Level_Tile_Head, after Player_GetTileAndSlope()
+        # $a &= 0b11000000;                         # sdw: was $c0; XX also, have to do this a different way
+        # was ASL, ROL, ROL, which cycles the top two bits through the carry flag and then into the low order bits (ASL brings 0 into the low order bit)
+        # $a >>= 6; # sdw, have to do this a different way
+        # $y = $a;                                  # Y = uppermost 2 bits down by 6 (thus 0-3, depending on which "quadrant" of tiles we're on, $00, $40, $80, $C0) XXX this won't work unless we number our tiles the same
+
+        # Checks for solid tile at Player's head
+        # $a = $Temp_Var1;
+        # sdw, from the Tile_AttrTable comments:
+        # In levels, both "halves" define the first tile of a quadrant to be solid
+        # The first half is solid at the ground (i.e. Player can stand on it)
+        # The second half is solid at the head and walls (i.e. Player bumps head on it, typically "full solidity" when combined above)
+        # sdw: my reading of this is that there are four pages of graphics tiles.  each page contains a mixture of solid and enterable tiles.
+        # sdw: two tables are kept.  one for blocks that can be stood on, and another for blocks with solid walls/bottom.
+        # sdw: $solidity_table->[ which kind of solidity we're checking ]->[ which page of tiles ] = number of first solid on that page
+        # sdw: so this goto if less than is probably executing the goto if we haven't hit our head; the tile is numbered below the number of the
+        # sdw: first solid tile
+        # goto PRG008_A7AD if $a < $Tile_AttrTable->[ $y + 4 ];  # CMP Tile_AttrTable+4,Y    ; Wall/ceiling-solid tile quadrant limits begin at Tile_AttrTable+4 # XXX Tile_AttrTable is a bunch of allocated space that data gets copied in to at the start of the level; XXX do this differnetly, for now; If tile index is less than value in Tile_AttrTable (not solid for wall/ceiling), jump to PRG008_A7AD # XXXXXXXXXXXX
+warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom};
+        goto PRG008_A7AD if ! $tile_properties{ $a }->{solid_bottom}; # $y = 0 for feet; sdw, goto if we haven't hit our head; continue on if we have hit our head
+        
+        $a = $Player_InAir | $Player_InWater; # | $Level_PipeMove; XXX
+        goto PRG008_A7AD if $a != 0;   # If Player is mid air, in water, or moving in a pipe, jump to PRG008_A7AD
+
+        # Solid tile at Player's head; Player is stuck in a low clearance (or worse stuck in the wall!)
+
+        # A is logically zero here...
+        $a = 0; # sdw:  doesn't hurt to make sure
+
+        # Stop Player horizontally, disable controls
+        $Player_XVel = $a;
+        $Pad_Input = $a;
+
+        $a &= ~ $PAD_A;
+        $Pad_Input = $a;   # ?? it's still zero?
+
+        # Player_LowClearance = 1 (Player is in a "low clearance" situation!)
+        $a = 0x01;
+        $Player_LowClearance = $a;
+
+        # This makes the Player "slide" when he's in a space too narrow
+        # $a += $Player_X; 
+        # $carry = $a > 255 ? 1 : 0;  $a -= 256 if $a > 255;
+        # $Player_X = $a;    # Player_X += 1
+        # goto PRG008_A7AD if ! $carry; # not needed
+        # $Player_XHi++;       # Otherwise, apply carry    # combine both of these into one variable?  yes.  this is not needed.
+        $Player_X += (1 << 4); # sdw
+
+      PRG008_A7AD:
+
+        # This will be used in Level_CheckIfTileUnderwater 
+        # as bits 2-3 of an index into Level_MinTileUWByQuad
+        # LDA Level_TilesetIdx
+        # ASL A
+        # ASL A
+        # STA <Temp_Var3     ; Temp_Var3 = Level_TilesetIdx << 2
+        # $Temp_Var3 = $a;    # sdw, do this tile property check another way
+
+        # $x = 0;             # Checks Temp_Var1 for tile and $40 override bit in UNK_584
+        # Level_CheckIfTileUnderwater();
+
+        # Carry is set by Level_CheckIfTileUnderwater if tile was in the
+        # "solid floor" region regardless of being "underwater" # XXXX do this another way
+        goto PRG008_A7BE if $carry; # BCS PRG008_A7BE     ; If carry set (tile was in solid region), jump to PRG008_A7BE
+
+        # 'Y' is the result of Level_CheckIfTileUnderwater:
+        # 0 = Not under water, 1 = Underwater, 2 = Waterfall
+        # TYA         
+        # BNE PRG008_A812     ; If Y <> 0 (somehow under water), jump to PRG008_A812
+
+      PRG008_A7BE:
+
+        # NOT underwater!
+
+        $a = $Player_InWater;
+        goto PRG008_A827 if $a == 0;     # If Player was not previously in water, jump to PRG008_A827
+
+        $a = $Player_InAir;
+        goto PRG008_A7CB if $a != 0;     # If Player is mid air, jump to PRG008_A7CB
+
+        # Player is NOT flagged as mid air...
+
+        goto PRG008_A827 if $carry;     # If tile was in the floor solid region, jump to PRG008_A827
+        goto PRG008_A80B if ! $carry;   # If tile was NOT in the floor solid region, jump to PRG008_A80B
+
+      PRG008_A7CB:
+
+        # Player is known as mid air!
+
+        goto PRG008_A7D1 if $carry;    # If tile was in floor solid region, jump to PRG008_A7D1
+
+        $a = $Player_YVel;
+        goto PRG008_A7E2 if $a < 0;    # If Player's Y velocity < 0 (moving upward), jump to PRG008_A7E2
+
+      PRG008_A7D1:
+
+        # Player's Y velocity >= 0...
+        # OR Player just hit a solid tile with the head
+
+        $a = $carry ? 0x80 : 0x00;   # The important concept here is to save the previous carry flag
+        $Temp_Var16 = $a;            # Temp_Var16 (most importantly) contains the previous carry flag in bit 7
+
+        $x = 0x01;                   # Checks Temp_Var2 for tile and $80 override bit in UNK_584
+        Level_CheckIfTileUnderwater();
+
+        goto PRG008_A7DE if $carry;  # If tile was in the floor solid region, jump to PRG008_A7DE
+        $a = $y;
+        goto PRG008_A80B if $a == 0; # If Y = 0 (Not underwater), jump to PRG008_A80B
+
+      PRG008_A7DE:
+        $a = $Temp_Var16;
+        goto PRG008_A812 if $a < 0 or $a & 0x80; # If we had a floor solid tile in the last check, jump to PRG008_A812; sdw: bit 7 was set to mark it negative
+
+        # Did NOT hit a solid floor tile with head last check
+
+      PRG008_A7E2:
+        $y = $Player_YVel;
+        goto PRG008_A7EA if $y > - 0x0c;   # If Player_YVel >= -$0C, jump to PRG008_A7EA
+
+        # Prevent Player_YVel from being less than -$0C
+        $y = - 0x0C;
+
+      PRG008_A7EA:
+        $a = $Counter_1 & 0x07;
+        goto PRG008_A7F1 if $a != 0;
+        $y++;         # 1:8 chance velocity will be dampened just a bit
+
+      PRG008_A7F1:
+        $Player_YVel = $y;    # Update Player_YVel
+
+        $a = $Pad_Input & ~ $PAD_A;
+        $Pad_Input = $a;     # Strip out 'A' button press
+
+        $y = $Pad_Holding;
+        $a = $y;          # Y = Pad_Holding
+
+        $a &= ~ $PAD_UP;  # Strip out 'Up'
+        $Pad_Holding = $a; 
+
+        $y = $a;
+        $a &= ( $PAD_UP | $PAD_A );
+        goto PRG008_A827 if $a != ( $PAD_UP | $PAD_A ); # If Player is not pressing UP + A, jump to PRG008_A827
+
+        # Player wants to exit water!
+        $a = - 0x34;
+        $Player_YVel = $a;   # Player_YVel = -$34 (exit velocity from water)
+
+      PRG008_A80B:
+
+        # Player NOT marked as "in air" and last checked tile was NOT in the solid region
+        # OR second check tile was not underwater
+
+        $y = 0;
+        $Player_SwimCnt = $y;    # Player_SwimCnt = 0
+        goto PRG008_A819;        # Jump (technically always) to PRG008_A819
+
+      PRG008_A812:
+
+        # Solid floor tile at head last check
+
+        $y = $Temp_Var15;
+        goto PRG008_A827 if $y == $Player_InWater;   # If Player_InWater = Temp_Var15 (underwater flag = underwater status), jump to PRG008_A827
+
+      PRG008_A819:
+
+        # Player's underwater flag doesn't match the water he's in...
+
+        $a = $y;
+        $a |= $Player_InWater;
+        $Player_InWater = $y;
+        goto PRG008_A827 if $a == 0x02;    # If it equals 2, jump to PRG008_A827; sdw, thanks for that useful comment, asshole
+
+        # JSR Player_WaterSplash     ; Hit water; splash! XXX
+
+      PRG008_A827:
+
+       # Player not flagged as "under water"
+       # Player not flagged as "mid air" and last checked tile was in solid region
+
+       $a = $Player_FlipBits & 0b01111111;
+       $Player_FlipBits = $a;                 # Clear vertical flip on sprite XXXXX use this to select left/right animation sets
+
+       # $y = $Level_TilesetIdx;     # Y = Level_TilesetIdx XXX
+       # $a = #TILEA_DOOR2;
+       # SUB <Temp_Var1    
+       # BEQ PRG008_A83F     ; If tile is DOOR2's tile, jump to PRG008_A83F
+
+       # Only fortresses can use DOOR1
+       # CPY #$01
+       # BNE PRG008_A86C     ; If Level_TilesetIdx <> 1 (fortress style), jump to PRG008_A86C
+
+       # CMP #$01
+       goto PRG008_A86C; # XXX # BNE PRG008_A86C     ; If tile is not DOOR1, jump to PRG008_A86C
+
+     # PRG008_A83F:
+
+       # DOOR LOGIC
+
+       # LDA <Pad_Input
+       # AND #PAD_UP
+       # BEQ PRG008_A86C     ; If Player is not pressing up in front of a door, jump to PRG008_A86C
+
+       # LDA <Player_InAir
+       # BNE PRG008_A86C     ; If Player is mid air, jump to PRG008_A86C
+
+       # If Level_PipeNotExit is set, we use Level_JctCtl = 3 (the general junction)
+       # Otherwise, a value of 1 is used which flags that pipe should exit to map
+
+       # LDY #$01    ; Y = 1
+
+       # LDA Level_PipeNotExit
+       # BEQ PRG008_A852     ; If pipe should exit to map, jump to PRG008_A852
+
+       # LDY #$03     ; Otherwise, Y = 3
+
+     # PRG008_A852:
+       # STY Level_JctCtl ; Set appropriate value to Level_JctCtl
+
+       # LDY #0
+       # STY Map_ReturnStatus     ; Map_ReturnStatus = 0
+
+       # STY <Player_XVel     ; Player_XVel = 0
+
+       # LDA <Player_X
+       # AND #$08
+       # BEQ PRG008_A864     ; If Player is NOT halfway across door, jump to PRG008_A864
+
+       # LDY #16         ; Otherwise, Y = 16
+
+     # PRG008_A864:
+       # TYA    
+       # ADD <Player_X     ; Add offset to Player_X if needed
+       # AND #$F0     ; Lock to nearest column (place directly in doorway)
+       # STA <Player_X     ; Update Player_X
+
+    PRG008_A86C:
+
+      # VINE CLIMBING LOGIC; sdw: skips to here after it rules out a door entrence
+
+      # LDA Player_InWater
+      # ORA Player_IsHolding
+      # ORA Player_Kuribo
+      # BNE PRG008_A890     ; If Player is in water, holding something, or in Kuribo's shoe, jump to PRG008_A890
+      goto PRG008_A890; # XXX
+
+      # LDA <Temp_Var1
+      # CMP #TILE1_VINE
+      # BNE PRG008_A890     ; If tile is not the vine, jump to PRG008_A890
+
+      # LDA Player_IsClimbing
+      # BNE PRG008_A898     ; If climbing flag is set, jump to PRG008_A898
+
+      # LDA <Pad_Holding
+      # AND #(PAD_UP | PAD_DOWN)
+      # BEQ PRG008_A890     ; If Player is not pressing up or down, jump to PRG008_A890
+
+      # LDY <Player_InAir
+      # BNE PRG008_A898     ; If Player is in the air, jump to PRG008_A898
+
+      # AND #%00001000
+      # BNE PRG008_A898     ; If Player is pressing up, jump to PRG008_A898
+
+    PRG008_A890:
+      $a = 0;
+      $Player_IsClimbing = $a;      # Player_IsClimbing = 0 (Player is not climbing)
+      goto PRG008_A8F9;             # Jump to PRG008_A8F9
+
+    PRG008_A898:
+      $a = 0x01;
+      $Player_IsClimbing = 1;       # Player_IsClimbing = 1 (Player is climbing)
+
+      # Kill Player velocities
+      $a = 0x00;
+      $Player_XVel = $a;
+      $Player_YVel = $a;
+
+      $y = 0x10;     # Y = $10 (will be Y velocity down if Player is pressing down)
+
+      $a = $Pad_Holding & ($PAD_UP | $PAD_DOWN);
+      goto PRG008_A8CA if $a != 0;                # If Player is not pressing up or down, jump to PRG008_A8CA
+
+      # Player is pressing UP or DOWN...
+
+      $a &= $PAD_UP;
+      goto PRG008_A8C8 if $a == 0;    # If Player is NOT pressing UP, jump to PRG008_A8C8
+
+      # Player is pressing UP...
+
+      $y = 16;
+      $a = $Player_Suit;
+      goto PRG008_A8B7 if $a == 0;  # If Player is small, jump to PRG008_A8B7
+
+      $y = 0;           #  Otherwise, Y = 0
+
+    PRG008_A8B7:
+    
+      $Temp_Var10 = $y;     # Temp_Var10 = 16 or 0 (if small) (Y Offset for Player_GetTileAndSlope)
+
+      $a = 0x08;
+      $Temp_Var11 = $a;     # Temp_Var11 = 8 (X Offset for Player_GetTileAndSlope)
+
+      Player_GetTileAndSlope();    # Get tile
+
+      # goto PRG008_A8CA if $a != #TILE1_VINE; # XXX constant  # If tile is NOT another vine, jump to PRG008_A8CA
+      goto PRG008_A8CA; # sdw XXX okay, let's just say that the tile isn't another vine; XXX jump-fly-flutter detects InAir
+
+      $y = - 0x10;
+      $Player_InAir = $y;      # Flag Player as "in air"
+
+    PRG008_A8C8:
+      $Player_YVel = $y;       # Set Player's Y Velocity
+
+    PRG008_A8CA:
+      $y = 0x10;     # Y = $10 (rightward X velocity)
+
+      $a = $Pad_Holding & ($PAD_LEFT | $PAD_RIGHT);
+      goto PRG008_A8DA if $a == 0;   # If Player is NOT pressing LEFT or RIGHT, jump to PRG008_A8DA
+
+      $a &= $PAD_LEFT;
+      goto PRG008_A8D8 if $a == 0;    # If Player is NOT pressing LEFT, jump to PRG008_A8D8
+
+      $y = - 0x10;
+
+    PRG008_A8D8:
+      $Player_XVel = $y;   # Set Player's X Velocity
+
+    PRG008_A8DA:
+      $a = $Player_IsClimbing;
+      goto PRG008_A8EC if $a == 0;      # If Player is NOT climbing, jump to PRG008_A8EC
+
+      # Player is climbing...
+
+      $a = $Player_InAir;
+      goto PRG008_A8EC if $a != 0;C     # If Player is in air, jump to PRG008_A8EC
+
+      $a = $Pad_Holding & ($PAD_UP | $PAD_DOWN);
+      goto PRG008_A8EC if $a != 0;     # If Player is pressing UP or DOWN, jump to PRG008_A8EC
+
+      $Player_IsClimbing = $a;     # Set climbing flag
+
+    PRG008_A8EC:
+
+      # Apply Player's X and Y velocity for the vine climbing
+      Player_ApplyXVelocity();
+      Player_ApplyYVelocity();
+
+      # Player_DoClimbAnim();     # Animate climbing XXX
+      # Player_Draw();     # Draw Player XXX
+      return; # RTS         # Return
+
+    PRG008_A8F9:
+
+      # Player not climbing...
+
+      $a = $Player_SlideRate;
+      goto PRG008_A906 if $a == 0;      # If Player sliding rate is zero, jump to PRG008_A906
+
+      # Otherwise, apply it
+      $a = $Player_XVel + $Player_SlideRate;
+      $Player_XVel = $a;
+
+    PRG008_A906:
+      Player_ApplyXVelocity();     # Apply Player's X Velocity
+
+      $a = $Player_SlideRate;    
+      goto PRG008_A916 if $a == 0;     # If Player is not sliding, jump to PRG008_A916
+
+      # Otherwise, apply it AGAIN; sdw, no, unapply it after having used it in Player_ApplyXVelocity() once
+      $a = $Player_XVel - $Player_SlideRate;
+      $a = $Player_XVel;
+
+    PRG008_A916:
+
+      $a = 0x00;
+      $Player_SlideRate = $a;     # Player_SlideRate = 0 (does not persist)
+
+      $y = 0x02;     # Y = 2 (moving right)
+
+      $a = $Player_XVel;
+      goto PRG008_A925 if $a > 0; # If Player's X Velocity is rightward, jump to PRG008_A925
+
+      $a = - $a;                  # Negate X Velocity (get absolute value)
+      $y--;                       # Y = 1 (moving left)
+
+    PRG008_A925:
+      goto PRG008_A928 if $a != 0;    # If Player's X Velocity is not zero (what is intended by this check), jump PRG008_A928
+
+      # Player's velocity is zero
+      $y = $a;         # And thus, so is Y (not moving left/right)
+
+    PRG008_A928:
+      $Temp_Var3 = $a;     # Temp_Var3 = absolute value of Player's X Velocity
+      $Player_MoveLR = $y; # Set Player_MoveLR appropriately
+      $a = $Player_InAir; 
+      goto PRG008_A940 if $a == 0;   # If Player is not mid air, jump to PRG008_A940
+      # $a = $Player_YHi; # XXX
+      goto PRG008_A93D; # goto PRG008_A93D if( ($Player_Y>>4) < $app->h/2);  # BPL PRG008_A93D     # If Player is on the upper half of the screen, jump to PRG008_A93D; hacked up a bit # XXXX disabling this for testing XXXX no, making this always go for testing; alright, this makes jumping work again.  shitty screen position testing was breaking that.
+
+      # Player is mid air, lower half of screen...
+
+      $a = ( $Player_Y >> 4);
+      # goto PRG008_A93D if( $a > ($app->h/4)*3 ); # BMI PRG008_A93D     # If Player is beneath the half point of the lower screen, jump to PRG008_A93D; sdw XXX hacked up a bit; also, what is the "half point of the lower screen"? XXXX disabling this for testing for a bit
+
+      $a = $Player_YVel;
+      xgoto PRG008_A940 if $a < 0;     # If Player is moving upward, jump to PRG008_A940
+
+    PRG008_A93D:
+      Player_ApplyYVelocity();     # Apply Player's Y velocity
+
+    PRG008_A940:
+      # Player_CommonGroundAnims();    # Perform common ground animation routines XXX
+
+      $a = $Player_Kuribo;
+      goto PRG008_A94C if $a == 0;      # If Player is not wearing Kuribo's shoe, jump to PRG008_A94C
+
+      # If in Kuribo's shoe...
+
+      $a = 14;         # A = 14 (Kuribo's shoe code pointer) # XXX
+      goto PRG008_A956;     # Jump (technically always) to PRG008_A956 # XXX
+
+    PRG008_A94C:
+      $a = $Player_Suit;
+
+      $y = $Player_InWater;
+      goto PRG008_A956 if $y == 0;    # If Player is not under water, jump to PRG008_A956
+
+      $a += 0x07;                     # Otherwise, add 7 (underwater code pointers)
+
+    PRG008_A956:
+
+      # ASL A         # 2-byte pointer; sdw; not needed
+      $y = $a; 
+
+      # MOVEMENT LOGIC PER POWER-UP / SUIT
+
+      # NOTE: If you were ever one to play around with the "Judgem's Suit"
+      # glitch power-up, and wondered why he swam in the air and Kuribo'ed
+      # in the water, here's the answer!
+
+      # Get proper movement code address for power-up 
+      # (ground movement, swimming, Kuribo's shoe)
+      # LDA PowerUpMovement_JumpTable,Y # XXX todo
+      # STA <Temp_Var1
+      # LDA PowerUpMovement_JumpTable+1,Y
+      # STA <Temp_Var2
+      # JMP [Temp_Var1]     # Jump into the movement code!
+      GndMov_Small(); # XXX for now
+
+    # PowerUpMovement_JumpTable:
+      # Ground movement code
+      # .word GndMov_Small    # 0 - Small
+      # .word GndMov_Big    # 1 - Big
+      # .word GndMov_FireHammer    # 2 - Fire
+      # .word GndMov_Leaf    # 3 - Leaf
+      # .word GndMov_Frog    # 4 - Frog
+      # .word GndMov_Tanooki    # 5 - Tanooki
+      # .word GndMov_FireHammer    # 6 - Hammer
+      # .word Swim_SmallBigLeaf    # 0 - Small  -- Underwater movement code
+      # .word Swim_SmallBigLeaf    # 1 - Big
+      # .word Swim_FireHammer    # 2 - Fire
+      # .word Swim_SmallBigLeaf    # 3 - Leaf
+      # .word Swim_Frog        # 4 - Frog
+      # .word Swim_Tanooki    # 5 - Tanooki
+      # .word Swim_FireHammer    # 6 - Hammer
+      # .word Move_Kuribo          # Kuribo's shoe
 
 }
 
+sub GndMov_Small {
+      Player_GroundHControl(); # Do Player left/right input control
+      Player_JumpFlyFlutter(); # Do Player jump, fly, flutter wag
+
+      # LDA Player_SandSink
+      #LSR A         
+      #BCS PRG008_A9A3     # If bit 0 of Player_SandSink was set, jump to PRG008_A9A3 (RTS)
+
+      $a = $Player_AllowAirJump;
+      goto PRG008_A9A3 if $a != 0;     # If Player_AllowAirJump, jump to PRG008_A9A3 (RTS)
+
+      $a = $Player_InAir;
+      goto PRG008_A9A3 if $a == 0;     # If Player is not mid air, jump to PRG008_A9A3 (RTS)
+
+      # Player is mid-air...
+
+      $a = $PF_JUMPFALLSMALL;    # Standard jump/fall frame
+
+      $y = $Player_FlyTime;
+      goto PRG008_A9A1 if $y == 0;      # If Player_FlyTime = 0, jump to PRG008_A9A1
+
+      $a = $PF_FASTJUMPFALLSMALL;     # High speed jump frame
+
+    PRG008_A9A1:
+      $Player_Frame = $a;             # Set appropriate frame
+
+    PRG008_A9A3:
+      return; # RTS
+}
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+#; Player_GroundHControl
+#;
+#; Routine to control based on Player's left/right pad input (not
+#; underwater); configures walking/running
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_GroundHControl {
+
+    $a = $Player_UphillFlag;
+    goto PRG008_AB56 if $a == 0; # If Player is not going up hill, jump to PRG008_AB56
+
+    $Player_WalkAnimTicks++;
+
+    $y = 10;       # Y = 10 (Player NOT holding B)
+
+    goto PRG008_AB5B if ! ( $Pad_Holding & $PAD_B ); # If Player is NOT holding 'B', jump to PRG008_AB5B
+
+    $y = 1;        # Y = 1 (Player holding B)
+    goto PRG008_AB5B;     # Jump (technically always) to PRG008_AB5B
+
+  PRG008_AB56:
+
+    # Use override value
+    
+    $y = $Player_UphillSpeedIdx;
+    goto PRG008_AB62 if $y == 0;     # If Player_UphillSpeedIdx = 0 (not walking uphill), jump to PRG008_AB62
+
+  PRG008_AB5B:
+    $a = $Player_UphillSpeedVals->[ $y ];     # Get uphill speed value
+    $y = $a;             # -> Y
+    goto PRG008_AB83;     # Jump to PRG008_AB83
+
+  PRG008_AB62:
+    $y = 24; # $y = #Pad_Input; sdw #Pad_Input seems to be the disassembler being overzealous in trying to replace a constant with a label
+
+    goto PRG008_AB83 if ! ( $Pad_Holding & $PAD_B ); # If Player is NOT holding 'B', jump to PRG008_AB83 
+
+    # Player is holding B...
+
+    $a = $Player_InAir | $Player_Slide;
+    goto PRG008_AB78 if $a != 0;    # If Player is mid air or sliding, jump to PRG008_AB78
+
+    $a = $Temp_Var3;   # sdw; this value set in PRG008_A928 in Player_Control
+    goto PRG008_AB78 if $a - $PLAYER_TOPRUNSPEED < 0; # If Player's X Velocity magnitude is less than PLAYER_TOPRUNSPEED, jump to PRG008_AB78
+
+    # Player is going fast enough while holding B on the ground; flag running!
+    $Player_RunFlag++; # Player_RunFlag = 1
+
+  PRG008_AB78:
+    # Start with top run speed
+    $y = $PLAYER_TOPRUNSPEED;
+
+    $a = $Player_Power;
+    goto PRG008_AB83 if $a - 0x7f != 0;    # If Player has not hit full power, jump to PRG008_AB83
+
+    # Otherwise, top power speed
+    $y = $PLAYER_TOPPOWERSPEED;     # Y = PLAYER_TOPPOWERSPEED
+
+  PRG008_AB83:
+    $Temp_Var14 = $y;     # Store top speed -> Temp_Var14
+
+    $y = $Player_Slippery;
+    goto PRG008_AB98 if $y == 0; # If ground is not slippery at all, jump to PRG008_AB98
+
+    $Player_WalkAnimTicks++;
+
+    $y--;
+    $a = $y;
+    $a <<= 3;  # sdw: ASL A x 3
+    $a += 0x40;
+    $y = $a;         # Y = ((selected top speed - 1) << 3) + $40 ??
+    goto PRG008_AB9E if $y != 0;     # And as long as that's not zero, jump to PRG008_AB9E
+
+  PRG008_AB98:
+    $a = $Player_Suit;
+    $a <<= 3;  # sdw: ASL A x 3
+    $y = $a;         # Y = Player_Suit << 3
+  
+  PRG008_AB9E:
+    # BIT <Pad_Holding
+    # BVC PRG008_ABA6     # If Player is NOT pressing 'B', jump to PRG008_ABA6
+    goto PRG008_ABA6 if ! ( $Pad_Holding & $PAD_B);    # If Player is NOT pressing LEFT, jump to PRG008_ABA6 
+
+    # Otherwise...
+    $y += 4; # Y += 4 (offset 4 inside Player_XAccel* tables)
+
+  PRG008_ABA6:
+    $a = $Pad_Holding;
+    $a &= ($PAD_LEFT | $PAD_RIGHT);
+    goto PRG008_ABB8 if $a != 0;     # If Player is pressing LEFT or RIGHT, jump to PRG008_ABB8
+
+    # Player not pressing LEFT/RIGHT...
+
+    $a = $Player_InAir;
+    goto PRG008_AC01 if $a != 0;    # If Player is mid air, jump to PRG008_AC01 (RTS)
+
+    $a = $Player_XVel;
+    goto PRG008_AC01 if $a == 0;    # If Player is not moving horizontally, jump to PRG008_AC01 (RTS)
+    my $moving_left = 0; # XXX hackish
+    goto PRG008_ABD3 if $a < 0;     # If Player is moving leftward, jump to PRG008_ABD3
+    goto PRG008_ABEB if $a > 0;     # If Player is moving rightward, jump to PRG008_ABEB
+
+  PRG008_ABB8:
+
+    # Player is pressing left/right...
+    # sdw: where we branched from, $a is holding $Pad_Holding &'d with ($PAD_LEFT | $PAD_RIGHT)
+
+    $y += 2;    # Y += 2 (offset 2 within Player_XAccel* tables, the "skid" rate)
+
+    $a &= $Player_MoveLR;   # sdw; again: "1 - Moving left, 2 - Moving right (reversed from the pad input)"
+    goto PRG008_ABCD if $a != 0;   # If Player suddenly reversed direction, jump to PRG008_ABCD
+
+    $y--;         # Y-- (back one offset, the "normal" rate)
+
+    $a = $Temp_Var3;
+    goto PRG008_AC01 if $a - $Temp_Var14 == 0; # If Player's current X velocity magnitude is the same as the selected top speed, jump to PRG008_AC01 (RTS)
+    goto PRG008_ABCD if $a - $Temp_Var14 < 0;  # If it's less, then jump to PRG008_AC01
+
+    $a = $Player_InAir;
+    goto PRG008_AC01 if $a != 0;   # If Player is mid air, jump to PRG008_AC01
+
+    $y--;         # Y-- (back one offset, the "friction" stopping rate)
+
+  PRG008_ABCD:
+
+    # At this point, 'Y' contains the current power-up in bits 7-3, 
+    # bit 2 is set if Player pressed B, bit 1 is set if the above
+    # block was jumped, otherwise bit 0 is set if the X velocity is
+    # less than the specified maximum, clear if over the max
+
+    $a = $Pad_Holding & $PAD_RIGHT;
+    goto PRG008_ABEB if $a != 0; # If Player is holding RIGHT, jump to PRG008_ABEB (moving rightward code)
+
+  PRG008_ABD3:
+
+    $moving_left = 1;
+    # XXX then fall through to PRG008_ABEB / Player moving rightward
+
+    # Player moving leftward
+
+    #$a = $Player_XAccelPseudoFrac->[ $y ];  # Negate value from Player_XAccelPseudoFrac[Y]
+    ## $a = - $a XXX
+    #$Temp_Var1 = $a;      # -> Temp_Var1
+
+    #$a = $Player_XAccelMain->[ $y ];  # Get Player_XAccelMain[Y]
+    ## poke( (\$a + 12), $a ^ 0xffffffff ); # XXX 32bit; 10^0xffffffff = 4294967285, as the IV gets its IsUV bit set, forcing it to be interpreted as an integer; was: EOR #$ff     # Negate it (sort of)
+    #$Temp_Var2 = $a;     # -> Temp_Var2
+
+    #$a = $Temp_Var1;
+    ## goto PRG008_ABF5 if $a != 0;      # If Temp_Var1 <> 0, jump to PRG008_ABF5
+
+    ## $Temp_Var2++;     # Otherwise, Temp_Var2++; sdw: this finishes the negation; xor 0xffffffff goes from 10 to -11, for example; this puts it back to -10; sdw XXX why it only does this if Player_XAccelPseudoFrac comes back non-zero is a mystery to me; maybe it has to do with increased chance of carry with negative numbers
+    #goto PRG008_ABF5;
+
+  PRG008_ABEB:
+
+    # Player moving rightward
+
+    $a = $Player_XAccelPseudoFrac->[ $y ]; # Get value from Player_XAccelPseudoFrac[Y]
+    $Temp_Var1 = $a;      # -> Temp_Var1
+
+    $a = $Player_XAccelMain->[ $y ]; # Get value from Player_XAccelMain[Y]
+    $Temp_Var2 = $a;      # -> Temp_Var2
+
+  PRG008_ABF5: 
+    $a = $Temp_Var1;
+    if( abs($a) + $Counter_Wiggly > 255 ) { 
+        # actual value not used, looking for a semi-random carry XXX this is tricky as a negative number is far more likely to roll over into carry, hence the abs()
+        $carry = 1;
+        $a -= 255;
+    } else {
+        $carry = 0;
+    }
+    # $carry = - $carry if $Temp_Var1 < 0;
+
+    $a = $Player_XVel;
+    if( $moving_left ) {
+        $a -= ( $Temp_Var2 + $carry);
+    } else {
+        $a += $Temp_Var2 + $carry;
+    }
+    $Player_XVel = $a;    # Player_XVel += Temp_Var2 (and sometimes carry)
+
+  PRG008_AC01:
+    return; # RTS         # Return
+
+}
+
+# ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# ; Level_CheckIfTileUnderwater
+# ;
+# ; This checks if the given tile in Temp_Var1/2 (depending on 'X')
+# ; is "underwater"...
+# ;
+# ; CARRY: The "carry flag" will be set and the input tile not
+# ; otherwise tested if the tile is in the "solid floor" region!
+# ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Level_CheckIfTileUnderwater { 
+    # XXX hacked up
+    my $tile = $x ? $Temp_Var1 : $Temp_Var2;
+    $a = 0;  # not underwater XXX
+    $carry = 0;
+warn "tile ``$a'' solid_top: " . $tile_properties{ $a }->{solid_top};
+    $carry = 1 if $tile_properties{ $tile }->{solid_top};
+}
+
+sub Player_JumpFlyFlutter {
+
+    $a = $Player_AllowAirJump;
+    goto PRG008_AC30 if $a == 0;  #If Player_AllowAirJump = 0, jump to PRG008_AC30
+
+    $Player_AllowAirJump--;
+
+  PRG008_AC30:
+
+    $a = $Pad_Input & $PAD_A;
+    $Temp_Var1 = $a;           # Temp_Var1 = $80 if Player is pressing 'A', otherwise 0
+    goto PRG008_AC9E if $a == 0; # If Player is NOT pressing 'A', jump to PRG008_AC9E
+
+    $a = $Player_AllowAirJump;
+    goto PRG008_AC41 if $a != 0; # If Player_AllowAirJump <> 0, jump to PRG008_AC41
+
+    $a = $Player_InAir;
+    goto PRG008_AC9E if $a != 0;    # If Player is mid air, jump to PRG008_AC9E
+
+  PRG008_AC41:
+
+    # Play jump sound
+    # LDA Sound_QPlayer
+    # ORA #SND_PLAYERJUMP     
+    # STA Sound_QPlayer
+
+    $a = $Player_StarInv;
+    goto PRG008_AC6C if $a == 0;   # If Player is not invincible by star, jump to PRG008_AC6C
+
+    $a = $Player_Power;
+    goto PRG008_AC6C if $a == 0x7f; # If Player is at max power, jump to PRG008_AC6C
+
+    $a = $Player_IsHolding;
+    goto PRG008_AC6C if $a != 0;     # If Player is holding something, jump to PRG008_AC6C
+
+    $a = $Player_Suit;
+    goto PRG008_AC6C if $a == 0;                   # If Player is small, jump to PRG008_AC6C
+    goto PRG008_AC6C if $a == $PLAYERSUIT_FROG;    # If Player is wearing frog suit, jump to PRG008_AC6C
+
+    # Otherwise, mark as mid air AND backflipping
+    # $Player_Flip = $a; # XXX
+    $Player_InAir = $a;
+
+    $a = 0;
+    $Player_AllowAirJump = $a;     # Cut off Player_AllowAirJump
+
+  PRG008_AC6C:
+
+    # Get absolute value of Player's X velocity
+    $a = $Player_XVel;
+    goto PRG008_AC73 if $a > 0;
+    $a = - $a;
+  PRG008_AC73:
+
+    $a >>= 4;
+    $x = $a;    # X = Magnitude of Player's X Velocity >> 4 (the "whole" part)
+
+    $a = $Player_RootJumpVel;         # Get initial jump velocity
+    $a -= $Player_SpeedJumpInc->[ $x ];     # Subtract a tiny bit of boost at certain X Velocity speed levels
+    $Player_YVel = $a;         # -> Y velocity
+
+    $a = 0x01;
+    $Player_InAir = $a;   # Flag Player as mid air
+
+    $a = 0;
+    $Player_WagCount = $a;         # Player_WagCount = 0
+    $Player_AllowAirJump = $a;     # Player_AllowAirJump = 0
+
+    $a = $Player_Power;
+    goto PRG008_AC9E if $a != 0x7f; # If Player is not at max power, jump to PRG008_AC9E
+
+    $a = $Player_FlyTime;
+    goto PRG008_AC9E if $a != 0; # If Player still has flight time left, jump to PRG008_AC9E
+
+    $a = 0x80;
+    $Player_FlyTime = $a;    # Otherwise, Player_FlyTime = $80
+
+  PRG008_AC9E:
+    $a = $Player_InAir;
+    goto PRG008_ACB3 if $a != 0;        # If Player is mid air, jump to PRG008_ACB3
+
+    $y = $Player_Suit;
+    $a = $PowerUp_Ability->[$y];    # Get "ability" flags for this power up
+    $a &= 0b01;
+    goto PRG008_AD1A if $a != 0;       # If power up has flight ability, jump to PRG008_AD1A
+
+    $a = 0;
+    $Player_FlyTime = 0;    # Otherwise, Player_FlyTime = 0 :(
+    goto PRG008_AD1A;     # Jump to PRG008_AD1A
+
+  PRG008_ACB3:
+
+    # Player is mid air...
+
+    $y = 5;     # Y = 5
+
+    $a = $Player_YVel;
+    goto PRG008_ACC8 if $a >= - 0x20;      # If Player's Y velocity >= -$20, jump to PRG008_ACC8
+
+    $a = $Player_mGoomba;
+    goto PRG008_ACCD if $a != 0;      # If Player has got a microgoomba stuck to him, jump to PRG008_ACCD
+
+    $a = $Pad_Holding;
+    goto PRG008_ACC8 if ! ( $a & $PAD_A );   # If Player is NOT pressing 'A', jump to PRG008_ACC8; was using BPL to test that bit 7 was 0
+
+    $y = 1;     # Y = 1
+    goto PRG008_ACCD;      # Jump (technically always) to PRG008_ACCD
+
+  PRG008_ACC8:
+    $a = 0;
+    $Player_mGoomba = 0; # Player_mGoomba = 0
+
+  PRG008_ACCD:
+    $a = $y;
+    $a += $Player_YVel;
+    $Player_YVel = $a; # Player_YVel += Y
+
+    $a = $Player_WagCount;
+    goto PRG008_ACD9 if $a == 0;    #  If Player_WagCount = 0, jump to PRG008_ACD9
+
+    $Player_WagCount--; # Otherwise, $F0--
+
+  PRG008_ACD9:
+    $a = $Player_Kuribo;
+    goto PRG008_ACEF if $a != 0; # If Player is wearing Kuribo's shoe, jump to PRG008_ACEF
+
+    $x = $Player_Suit;
+
+    $a = $PowerUp_Ability->[ $x ];    # Get "ability" flags for this power up
+    $a &= 0b0001;
+    goto PRG008_ACEF if $a == 0;          # If this power up does not have flight, jump to PRG008_ACEF
+
+    $y = $Temp_Var1;        # Y = $80 if Player was pressing 'A' when this all began
+    goto PRG008_ACEF if $y == 0; # And if he wasn't, jump to PRG008_ACEF
+
+    $a = 0x10;
+    $Player_WagCount = $a;     # Otherwise, Player_WagCount = $10
+
+  PRG008_ACEF:
+    $a = $Player_WagCount;
+    goto PRG008_AD1A if $a == 0; # If Player has not wag count left, jump to PRG008_AD1A
+
+    # RACCOON / TANOOKI TAIL WAG LOGIC
+
+    $a = $Player_YVel;
+    goto PRG008_AD1A if $a < $PLAYER_FLY_YVEL; # If Player's Y velocity is < PLAYER_FLY_YVEL, jump to PRG008_AD1A
+
+    $y = $PLAYER_FLY_YVEL;     # Y = PLAYER_FLY_YVEL
+
+    $a = $Player_FlyTime;
+    goto PRG008_AD0E if $a == 0; # If Player is not flying, jump to PRG008_AD0E
+
+    goto PRG008_AD18 if $a >= 0x0f; # If Player has a great amount of flight time left, jump to PRG008_AD18
+
+    # Player has a small amount of flight time left
+
+    $y = 0xF0;
+    $a &= 0x08;
+    goto PRG008_AD18 if $a != 0; # Every 8 ticks, jump to PRG008_AD18
+
+    $y = 0;     # Y = 0 (at apex of flight, Player no longer rises)
+    goto PRG008_AD18;     # Jump (technically always) to PRG008_AD18
+
+  PRG008_AD0E:
+    $a =  $Player_YVel;
+    goto PRG008_AD1A if $a < 0;      # If Player's Y velocity < 0 (moving upward), jump to PRG008_AD1A
+
+    goto PRG008_AD1A if $a < $PLAYER_TAILWAG_YVEL; # If Player's Y velocity < PLAYER_TAILWAG_YVEL, jump to PRG008_AD1A
+    $y = $PLAYER_TAILWAG_YVEL; # Y = PLAYER_TAILWAG_YVEL; sdw, otherwise, cap Y velocity at PLAYER_TAILWAG_YVEL
+
+  PRG008_AD18:
+    $Player_YVel =  $y; # Set appropriate Y velocity
+
+  PRG008_AD1A:
+    $a = $Player_UphillSpeedIdx;
+    goto PRG008_AD2E if $a == 0;      # If Player_UphillSpeedIdx = 0 (not walking uphill), jump to PRG008_AD2E
+
+    $a >>= 1;
+    $y = $a;         # Y = Player_UphillSpeedIdx >> 1
+
+    $a = $Player_YVel;
+    goto PRG008_AD2E if $a >= 0; # If Player's Y vel >= 0, jump to PRG008_AD2E (RTS)
+
+    goto PRG008_AD2E if $a < $PRG008_AC22->[ $y ]; # If Player's uphill speed < Y velocity, jump to PRG008_AD2E
+
+    $a = 0x20;
+    $Player_YVel = $a; # Player_YVel = $20
+
+  PRG008_AD2E:
+    return; # RTS
+}
+
+
+##;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+## Player_ApplyYVelocity
+##   
+## Applies Player's Y velocity and makes sure he's not falling
+## faster than the cap value (FALLRATE_MAX)
+##;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_ApplyYVelocity {
+    $a = $Player_YVel;
+    goto PRG008_BFF9 if $a < 0;  # If Player_YVel < 0, jump to PRG008_BFF9
+    
+    goto PRG008_BFF9 if $a < $FALLRATE_MAX;  # BLS PRG008_BFF9  # If Player_YVelo < FALLRATE_MAX, jump to PRG008_BFF9
+    
+    # Cap Y velocity at FALLRATE_MAX
+    $a = $FALLRATE_MAX;
+    $Player_YVel = $a; # Player_YVel = FALLRATE_MAX
+
+  PRG008_BFF9:
+    $x = 1; # LDX #(Player_YVel - Player_XVel) # Do the Y velocity # pointer arith; sdw, not actually 1, but faking it
+    Player_ApplyVelocity();     # Apply it!
+    
+    # RTS      # Return
+}
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# Player_ApplyXVelocity
+#
+# Applies Player's X velocity and makes sure he's not moving
+# faster than the cap value (PLAYER_MAXSPEED)
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_ApplyXVelocity {
+    $x = 0;    # X = 0
+    $y = $PLAYER_MAXSPEED;    # Y = PLAYER_MAXSPEED
+   
+    $a = $Player_XVel;
+    goto PRG008_BFAC if $a >= 0; # BPL PRG008_BFAC  # If Player_XVel >= 0, jump to Player_ApplyXVelocity
+   
+    $y = - $PLAYER_MAXSPEED;    # Y = -PLAYER_MAXSPEED
+ 
+    # Negate Player_XVel (get absolute value)
+    $a = - $a;
+
+  PRG008_BFAC:
+    $Temp_Var16 = $a;     # Store absolute value Player_XVel -> Temp_Var16
+    goto &Player_ApplyVelocity if $a < $PLAYER_MAXSPEED; # BLS Player_ApplyVelocity # If we haven't hit the PLAYER_MAXSPEED yet, apply it!
+    $Player_XVel = $y;     # Otherwise, cap at max speed!
+
+    # falls through to Player_ApplyVelocity
+    goto &Player_ApplyVelocity;
+
+}
+
+##;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+## Player_ApplyVelocity
+##
+## Applies Player's velocity for X or Y (depending on register 'X')
+##;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_ApplyVelocity {
+    $Player_X += ($Player_XVel + $Player_XVelAdj) if $x == 0; # sdw, in the game, 4 bits of Player_YVel and Player_XVel are fractional; but that's okay because so are the flast four bits fo $Player_X and $Player_Y
+    $Player_Y += $Player_YVel if $x > 0;
+}
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+#; Player_GetTileAndSlope
+#;   
+#; Gets tile and attribute of tile for either non-vertical or
+#; vertical levels based on Player's position
+#;
+#; Temp_Var10 is a Y offset (e.g. 0 for Player's feet, 31 for Player's head)
+#; Temp_Var11 is an X offset
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_GetTileAndSlope {
+     my $y = ($Player_Y >> 4) + $Temp_Var10;
+     my $x = ($Player_X >> 4) + $Temp_Var11;
+     $x >>= 4; # again; go from pixels to tiles, and tiles at 16 pixels wide
+     $y >>= 4; # ditto
+    # X/Y were not modified, so as inputs:
+    # X = 0 (going down) or 1 (going up)
+    # Y = Player_YVel
+    #     JSR Player_GetTileAndSlope_Normal    ; Set Level_Tile and Player_Slopes; ... this sets Level_Tile and A
+    # JSR Player_GetTileV  ; Get tile, set Level_Tile
+     $a = $map->[$x]->[$y]; # XXX okay, where do we stick this?  A, it looks like, and $Level_Tile too, but so far, it's only a temp nothing uses
+warn "Player_GetTileAndSlope for $x, $y = ``$a''";
+}
+
+
+# ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# ; Player_DetectSolids
+# ;
+# ; Handles Player's collision against solid tiles (wall and ground,
+# ; handles slopes and sliding on them too!)
+# ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Player_DetectSolids {
+
+	$a = 0;
+	$Player_HitCeiling = $a; # Clear Player_HitCeiling
+
+	$a = $Level_PipeMove;
+    goto PRG008_B47E if $a == 0;     # If not going through a pipe, jump to PRG008_B47E
+    return;
+
+  PRG008_B47E:
+    # $a = $Slope_LUT_Addr;
+    # $Level_GndLUT_Addr = $a;
+
+    # LDA Slope_LUT_Addr+1
+    # STA <Level_GndLUT_Addr+1
+
+    # LDA Level_SlopeEn
+    # BEQ PRG008_B4A5     # If not a sloped level, jump to PRG008_B4A5
+    goto PRG008_B4A5; # XXX sdw; skipping the slope stuff, for now
+
+    # LDA Level_Tileset
+    # CMP #$03
+    # BEQ PRG008_B4A2     # If Level_Tileset = 3 (Hills style), jump to PRG008_B4A2
+    # CMP #14
+    # BEQ PRG008_B4A2     # If Level_Tileset = 14 (Underground style), jump to PRG008_B4A2
+
+    # Non-sloped levels use this:
+    # RAS: NOTE: I don't think this really means anything; this ends up pointing to
+    # Level_LayPtrOrig_AddrH (original layout pointer high byte), which doesn't make
+    # sense, but Level_GndLUT_Addr/H isn't used in a non-slope level anyway, so this is
+    # probably some bit of "dead" code or something...
+
+    # LDA NonSlope_LUT_Addr
+    # STA <Level_GndLUT_Addr
+
+    # LDA NonSlope_LUT_Addr+1
+    # STA <Level_GndLUT_Addr+1
+
+  # PRG008_B4A2:
+    # JMP PRG000_B9D8     # Jump to PRG000_B9D8
+
+  PRG008_B4A5:
+    # Slopes not enabled...
+
+    $y = 32 + 6; # LDY #(TileAttrAndQuad_OffsFlat_Sm - TileAttrAndQuad_OffsFlat) + 6    # 6 = 3 * 2 (the offset we start on below) and work backwards from; sdw: 32 moves us from TileAttrAndQuad_OffsFlat to the start of the data for TileAttrAndQuad_OffsFlat_Sm, which got combined into there
+
+    $a = $Player_Suit;
+    goto PRG008_B4B2 if $a == 0; # If Player is small, jump to PRG008_B4B2
+
+    $a = $Player_IsDucking;
+    goto PRG008_B4B2 if $a != 0;    # If Player is ducking, jump to PRG008_B4B2
+
+    $y = 6;        # 6 = 3 * 2 (the offset we start on below) and work backwards from
+
+  PRG008_B4B2:
+    $x = 3;     # X = 3 (the reason for +6 above)
+
+    $a = $Player_YVel; 
+    goto PRG008_B4BD if $a >= 0;   # If Player_YVel >= 0 (moving downward), jump to PRG008_B4BD
+
+    # Otherwise, add 16 to index
+    $a = $y;
+    $a += 16;
+    $y = $a;
+
+  PRG008_B4BD:
+    $a = $Player_X>>4; # sdw, our $Player_X has the fractal part in it, so chopping that off
+    $a &= 0x0f;
+    goto PRG008_B4CA if $a < 0x08; # If Player is on the left half of the tile, jump to PRG008_B4CA
+
+    # If on the right half, add 8 to index
+    $a = $y;
+    $a += 0x08;
+    $y = $a;
+
+  PRG008_B4CA:
+    $a = $y;
+    push @stack, $a; # PHA         # Save offset
+
+    # Get X/Y offset for use in detection routine
+    $a = $TileAttrAndQuad_OffsFlat->[ $y ];
+    $Temp_Var10 = $a;     # Temp_Var10 (Y offset)
+    $a = $TileAttrAndQuad_OffsFlat->[ $y + 1 ]; 
+    $Temp_Var11 = $a;     # Temp_Var11 (X offset)
+
+    Player_GetTileAndSlope();     # Get tile
+    ${ $Level_Tile_Array->[ $x + 1 ] } = $a;    # STA Level_Tile_GndL,X     # Store i; sdw Level_Tile_GndL is at offset 1 in the array, so +1
+
+    push @stack, $a;  # PHA         # Save tile
+
+    # AND #%11000000     # Get quadrant XXX sdw todo
+    # ASL A         
+    # ROL A         
+    # ROL A         #
+    # STA Level_Tile_Quad,X     # Store quadrant number
+
+    $a = pop @stack; # PLA         # Restore tile
+
+    # JSR Level_DoCommonSpecialTiles     # Handle tile apporiately XXX
+
+    $a = pop @stack; # PLA         
+    $y = $a;  # TAY         # Restore 'Y' index
+    $y -= 2;  # Y -= 2 (next pair of offsets)
+
+    $x--;
+
+    goto PRG008_B4F3 if $x < 0;     # If X < 0, jump to PRG008_B4F3
+    goto PRG008_B4CA;     # Otherwise, loop!
+
+  PRG008_B4F3:
+    # Wall hit detection
+    $y = 2;     # Y = 2 (checking "in front" tiles, lower and upper)
+
+    Level_CheckGndLR_TileGTAttr();
+    goto PRG008_B53B if ! $carry;     # If not touching a solid tile, jump to PRG008_B53B
+
+    $a = $Player_LowClearance;
+    goto PRG008_B53B if $a != 0;      # If Player_LowClearance is set, jump to PRG008_B53B
+
+    $Player_WalkAnimTicks++;
+
+    $y = 1;
+    $x = 0;
+
+    $a = $Player_X >> 4; # sdw, chop off fractional bits
+    $a &= 0x0f;
+    goto PRG008_B511 if $a >= 0x08; # If Player is on the right side of the tile, jump to PRG008_B511
+
+    # Otherwise...
+    $y = -1;
+    $x++;         # X = 1
+
+  PRG008_B511:
+    $a = $Player_Suit;
+    goto PRG008_B517 if $a != 0;    # If Player is NOT small, jump to PRG008_B517
+
+    $x += 2;         # X += 2 (X = 2 or 3)
+
+  PRG008_B517:
+    $a = $PRG008_B3AC->[ $x ];
+    $a += ( $Player_X >> 4 ); # sdw, added the >>4    # Add appropriate offset to Player_X
+
+    $a &= 0x0f;
+    goto PRG008_B53B if $a == 0;     # If Player is on new tile, jump to PRG008_B53B (sdw: that's the not-a-hit condition)
+
+    $a = $y;         # A = 1 or -1; sdw: -1 if player is on right side of the tile, 1 otherwise
+
+    $Player_X = $a * (1<<4) + $Player_X; # deal with $Player_X<<4 stuff # ADD <Player_X     # Add +1/-1 to Player_X # STA <Player_X     # Update Player_X
+    # $a = $Player_X>>4; # sdw, without fractal part into $a, if the code were to actually use that value
+
+    $y++;
+
+    $a = $Player_XVel;
+    goto PRG008_B536 if $a >= 0; # If Player_XVel >= 0, jump to Player_XVel
+
+    # This basically amounts to a single decrement of 'Y' if Player_XVel < 0
+    $y -= 2;
+
+  PRG008_B536:
+    $a = $y;
+    goto PRG008_B53B if $a != 0; # If Y <> 0, jump to PRG008_B53B  (sdw: that's the not-a-hit condition)
+
+    $Player_XVel  = $a; # Otherwise, halt Player horizontally
+
+  PRG008_B53B:
+    # sdw: this is where stuff branches to when the player did not run into a solid tile side to side (X axis)
+    $a = $Player_YVel;
+    goto PRG008_B55B if $a >= 0;    # If Player Y velocity >= 0 (moving downward), jump to PRG008_B55B
+
+    $a = $Player_InAir;
+    goto PRG008_B55B if $a == 0;    # If Player is NOT mid air, jump to PRG008_B55B; sdw, that is, if he isn't marked as mid-air, but we're going to check again
+
+    $y = 0;     # Y = 0; sdw, this means checking the two tiles under the player; but then we set $Player_HitCeiling if it hits!?
+
+    Level_CheckGndLR_TileGTAttr();
+    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A
+
+    $y++;         # Y = 1
+    $Player_HitCeiling = $y;    # Flag Player as having just hit head off ceiling
+
+    # LDA Level_AScrlVVel    # Get autoscroll vertical velocity # XXX
+    # JSR Negate     # Negate it
+    # BPL PRG008_B558     # If positive, jump to PRG008_B558
+
+    # Otherwise, just use 1
+    # LDA #$01    
+
+  # PRG008_B558:
+    # STA <Player_YVel # Update Player_YVel
+    $Player_YVel = 1;
+
+  PRG008_B55A:
+    return;
+
+  PRG008_B55B:
+    # sdw: check tiles to see if the player is in mid-air or landed
+    # LDX Level_Tile_Quad+1     # Get right tile quadrant
+    $a = $Level_Tile_GndR;     # Get right tile
+    # CMP Tile_AttrTable,X    
+    # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
+warn "tile ``$a'' below right is solid: " . $tile_properties{ $a }->{solid_top}; # XXXXXXX this is coming up with the wrong tile
+    goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
+
+    # LDX Level_Tile_Quad     # Get left tile quadrant
+    $a = $Level_Tile_GndL;     # Get left tile
+    # CMP Tile_AttrTable,X    
+    # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
+warn "tile ``$a'' below left is solid: " . $tile_properties{ $a }->{solid_top};
+    goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
+
+    $a = $Player_InAir;
+    goto PRG008_B5BB if $a != 0;    # If Player is mid air, jump to PRG008_B5BB
+
+    # Otherwise...
+
+warn "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx halted player vertically XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    $Player_YVel = $a; # Halt Player vertically
+
+    $a = 1; 
+    $Player_InAir = $a; # Mark Player as mid air
+
+    goto PRG008_B5BB;     # Jump to PRG008_B5BB
+
+  PRG008_B57E:
+    # sdw, sent here when either of the players feet are on a solid topped tile
+    $a = $Temp_VarNP0; # XXX this var not used or set before here; hope it doesn't have an important value it's initialized to
+    goto PRG008_B59C if $a == 0;       # If did not use "high" Y last call to Player_GetTileAndAttr, jump to PRG008_B59C
+
+    # sdw: hacked this up a bit to deal with preserving the fractal part that we merged into $Player_Y
+    # sdw: also, it currently won't ever run as $Temp_VarNP0 is stuck at 0
+    $a = ( $Player_Y >> 4);         # Get Player Y
+    # SUB Level_VertScroll    # Make scroll relative
+    $a &= 0xf0; # AND #$F0         # Nearest 16
+    $a += 1; # ADD #$01         # +1
+    # ADD Level_VertScroll    # Make un-relative
+    $Player_Y = ( ($a<<4) | ( $Player_Y & 0b01111) ); # STA <Player_Y        # Set Player_Y!
+
+    # LDA #$00
+    # ADC #$00
+    # STA <Player_YHi        # Apply carry if needed
+    # BPL PRG008_B5B2         # If carry >= 0, jump to PRG008_B5B2; XXX sdw this kills the player.  why?  guess with the VertScroll added in, carry indicates off the bottom of the screen... maybe?
+
+  PRG008_B59C:
+    # sdw: this happens when the player is in contact with a solid tile; extra $Player_Y--'s make him bounce in place
+    $a = ( $Player_Y >> 4 );
+    $a &= 0x0f; # AND #$0f    # Relative to tile vertical position
+    # die "a >= 6 XXX" if $a >= 6; # XXX happens when the player gets stuck part way through the ground
+    goto PRG008_B5BB if $a >= 6; # If Player's vertical tile position >= 6, jump to PRG008_B5BB; sdw, player stuck in ground XXXXX commenting this out makes the bug where we fall through the floor vanish
+    # goto PRG008_B5BB if $a >= 10; # If Player's vertical tile position >= 6, jump to PRG008_B5BB; sdw, player stuck in ground XXXXX commenting this out makes the bug where we fall through the floor vanish; XXX using a higher value for this seems to cure the problem too; XXXX real probably is probably that Mario is falling too fast; yeah, looks like YVel was being added twice, but that actually made jumping work. grr!
+
+    $a = ( $Player_Y >> 4);
+    $a &= 0x0f;                       # Relative to tile vertical position
+    goto PRG008_B5B2 if $a == 0;      # If zero, jump to PRG008_B5B2; sdw, player is exactly on the ground; mark him as landed
+
+    goto PRG008_B5B0 if $a == 1; # If 1, jump to PRG008_B5B0; sdw, player is one pixel into the ground; move up him and mark him as landed
+
+    # sdw: this would happen with values from 2-5; inch the player upwards a little
+    $Player_Y -= (1<<4);     # Player_Y--
+
+  PRG008_B5B0:
+    $Player_Y -= (1<<4);     # Player_Y--
+
+  PRG008_B5B2:
+    # sdw:  the player hit the ground
+    $a = 0;
+    $Player_InAir = 0; # Player NOT mid air
+    $Player_YVel = 0;  # Halt Player vertically
+    $Kill_Tally = 0;   # Reset Kill_Tally
+
+  PRG008_B5BB:
+    return;         # Return
+
+}
+
+# This checks if the given tile is greater-than-or-equal-to
+# the related "AttrTable" slot and, if so, returns 'carry set'
+# sdw: carry set indicates that we're touching a solid
+# sdw: Y is index into $Level_Tile_Array (not relative to the beginning but starting at _GndL and _GndR) 
+# sdw: XXX since this uses the same offset into the Tile_AttrTable and into $Level_Tile, I think this means that head, feet, side of player each have different values that tile numbers are compared to; what I've read supports this
+# sdw: likely, Y is either 0 to check GndL and GndR, or is 2 to check InFL, InFU; yup, comments in the code back this up
+
+sub Level_CheckGndLR_TileGTAttr {
+
+    # LDX Level_Tile_Quad+1,Y # Get this particular "quad" (0-3) index
+    $a = ${ $Level_Tile_Array->[ $y + 2 ] };       # LDA Level_Tile_GndR,Y # Check the tile here; sdw, it goes _Head, _GndL, _GndR, _InFL, then _InFU (in front lower, in front upper), and it was starting at Level_Tile_GndR, so +2 skips ahead in the array to match the ponter arith
+    # CMP Tile_AttrTable+4,X # XXXXXXX X indicates which attribute to check
+    # BGE PRG008_B5D0         # If the tile is >= the attr value, jump to PRG008_B5D0 (NOTE: Carry set when true)
+
+    # LDX Level_Tile_Quad,Y       # Get this particular "quad" (0-3) index
+    $a = ${ $Level_Tile_Array->[ $y + 1 ] };       # LDA Level_Tile_GndL,Y # Check the tile here; sdw, was relative to Level_Tile_GndL, which is +1 in $Level_Tile
+    # CMP Tile_AttrTable+4,X      # Set carry if tile is >= the attr value XXXX X indicates which attribute to check
+
+    my $tile1 = ${ $Level_Tile_Array->[ $y + 2 ]; };       # as above
+    my $tile2 = ${ $Level_Tile_Array->[ $y + 1 ]; };      # as above
+
+    $carry = 0;
+    $carry = 1 if $y == 0 and ( $tile_properties{ $tile1 }->{solid_top} or $tile_properties{ $tile2 }->{solid_top} ); # $y = 0 for feet
+    $carry = 1 if $y == 2 and ( $tile_properties{ $tile1 }->{solid_bottom} or $tile_properties{ $tile2 }->{solid_bottom} ); # $y = 2 for front; solid bottom and solid sides are the same thing
+warn "tile ``$tile1'' with y=$y is solid top: " . $tile_properties{ $tile1 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile1 }->{solid_bottom};
+warn "tile ``$tile2'' with y=$y is solid top: " . $tile_properties{ $tile2 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile2 }->{solid_bottom};
+warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing " . ( $y == 0 ? "feet" : "front" );
+    #  XXX the head collision check is made elsewhere
+
+  PRG008_B5D0:
+
+    # NOTE: The return value is "carry set" for true!
+
+    return;      # Return
+
+}
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# Read_Joypads
+#
+# This subroutine reads the status of both joypads 
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# sdw: this is called from IntNMI
+
+sub Read_Joypads {
+
+	# Read joypads
+	$y = 0; # LDY #$01	 # Joypad 2 then 1; sdw, only doing one joypad
+
+  PRG031_FEC0:
+    Read_Joypad(); # Read Joypad Y
+
+	# FIXME: I THINK this is for switch debouncing?? sdw, don't need to do this; no, not for debouncing, for dealing with lost bits as explained in http://wiki.nesdev.com/w/index.php/Standard_controller
+  # PRG031_FEC3:
+    $a = $Temp_Var1;      # Pull result out of $00 -> A
+    # push @stack, $a;          # Push A
+    # JSR Read_Joypad     # Read Joypad
+    # PLA         # Pull A
+    # CMP <Temp_Var1     # Check if same
+    # BNE PRG031_FEC3     # If not, do it again
+
+    $a |= $Temp_Var2; # ORA <Temp_Var2     #  sdw, not sure what gets read from hardware into $Temp_Var2
+    push @stack, $a;          # Push A
+    $a &= 0x0f;     # A &= $0F
+    $x = $a;          # A -> X
+    $a = pop @stack;         # Pull A
+    $a &= 0xf0;
+    # sdw: not sure what the | $Temp_Var2 is about, but $x gets up/down/left/right and $a gets select/start/A/B
+
+    # warn "a $a x $x Read_Joypads_UnkTable $Read_Joypads_UnkTable->[$x]";
+    $a |= $Read_Joypads_UnkTable->[ $x ]; # ORA Read_Joypads_UnkTable,X     # FIXME: A |= Read_Joypads_UnkTable[X]
+    push @stack, $a;              # Save A
+    $Temp_Var3 = $a;          # Temp_Var3 = A
+    $a ^= $Controller1; # EOR Controller1,Y    # sdw XX, ignoring controller 2
+    $a &= $Temp_Var3; 
+    $Controller1Press = $a; # STA Controller1Press,Y    # Figures which buttons have only been PRESSED this frame as opposed to those which are being held down; sdw XX ignoring controller 2
+    $Pad_Input = $a;
+    $a = pop @stack;
+    $Controller1 = $a; # STA Controller1,Y    # XX ignoring controller 2
+    $Pad_Holding = $a;
+    # DEY         # Y-- ; sdw XX, only doing one joypad
+    # BPL PRG031_FEC0     # If Y hasn't gone negative (it should just now be 0), Read other joypad; sdw XX, only doing one joypad
+
+    # Done reading joypads
+    $y = $Player_Current;
+    goto PRG031_FF11 if $y == 0;     # If Player_Curren = 0 (Mario), jump to PRG031_FF11
+
+    # sdw:  stuff related to pulling in controller data for Luigi
+    #LDA <Controller1
+    #AND #$30
+    #STA <Temp_Var1
+    #LDA <Controller2
+    #AND #$cf
+    #ORA <Temp_Var1
+    #STA <Pad_Holding
+    #LDA <Controller1Press
+    #AND #$30
+    #STA <Temp_Var1
+    #LDA <Controller2Press
+    #AND #$cf
+    #ORA <Temp_Var1
+    #STA <Pad_Input
+
+PRG031_FF11:
+    return;        # Return
+}
+
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+# Read_Joypad
+#
+# This subroutine does some tricky business to read out the joypad
+# into Temp_Var1 / Temp_Var2
+# Register Y should be 0 for Joypad 1 and 1 for Joypad 2
+#;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+sub Read_Joypad {
+    # $FF12
+    # Joypad reading is weird, and actually requires 8 accesses to the joypad I/O to get all the buttons:
+    # Read #1: A 
+    #      #2: B 
+    #      #3: Select
+    #      #4: Start 
+    #      #5: Up    
+    #      #6: Down  
+    #      #7: Left  
+    #      #8: Right 
+
+    # This Resets BOTH controllers
+    # LDA #$01     # A = 1 (strobe)
+    # STA JOYPAD     # Strobe joypad 1 (hi)
+    # LSR A         # A = 0 (clear), 1 -> Carry
+    # STA JOYPAD     # Clear strobe joypad 1
+
+    # Needs cleanup and commentary, but basically this does 8 loops to
+    # read all buttons and store the result for return
+    # sdw: http://wiki.nesdev.com/w/index.php/Standard_controller states:
+    # The first 8 reads will indicate which buttons are pressed (1 if pressed, 0 if not pressed); all subsequent reads will return D=1 on an authentic controller but may return D=0 on third party controllers.
+    # Button status for each controller is returned in the following order: A, B, Select, Start, Up, Down, Left, Right. 
+    # sdw:  http://wiki.nesdev.com/w/index.php/Standard_controller doesn't say what bit 1 is
+    # LDX #$08     # X = 8
+  # Read_Joypad_Loop:
+    # LDA JOYPAD,Y     # Get joypad data
+    # LSR A                    # sdw: JOYPAD,Y bit 0 -> C
+    # ROL <Temp_Var1           # sdw: C -> Temp_Var1 bit 0
+    # LSR A                    # sdw: JOYPAD,Y bit 1 -> C
+    # ROL <Temp_Var2           # sdw: C -> Temp_Var2 bit 0
+    # DEX
+    # BNE Read_Joypad_Loop     # Loop until 8 reads complete
+
+    # RTS         # Return
+
+    $Temp_Var2 = 0; # XXX not sure what this would be in real hardware, but it gets |'d against $Temp_Var1
+
+    $Temp_Var1 = 0;
+    $Temp_Var1 |= $PAD_A       if $pressed->{A};
+    $Temp_Var1 |= $PAD_B       if $pressed->{B};
+    $Temp_Var1 |= $PAD_SELECT  if $pressed->{select}; # XXX
+    $Temp_Var1 |= $PAD_START   if $pressed->{start}; # XXX
+    $Temp_Var1 |= $PAD_UP      if $pressed->{up};
+    $Temp_Var1 |= $PAD_DOWN    if $pressed->{down};
+    $Temp_Var1 |= $PAD_LEFT    if $pressed->{left};
+    $Temp_Var1 |= $PAD_RIGHT   if $pressed->{right};
+
+};
+
+
 __END__
 
-; NonMaskableInterrupt->OperModeExecutionTree-> 
-; GameMode->GameCoreRoutine->GameRoutines->PlayerCtrlRoutine->PlayerMovementSubs
-;                        |-->GameEngine
+Player_Control->Player_GroundHControl
 
+XXX to convert:
 
-PlayerCtrlRoutine:
-; ...
-SaveJoyp:   lda SavedJoypadBits         ;otherwise store A and B buttons in $0a
-            and #%11000000
-            sta A_B_Buttons
-            lda SavedJoypadBits         ;store left and right buttons in $0c
-            and #%00000011
-            sta Left_Right_Buttons
-            lda SavedJoypadBits         ;store up and down buttons in $0b
-            and #%00001100
-            sta Up_Down_Buttons
-            and #%00000100              ;check for pressing down
-            beq SizeChk                 ;if not, branch
-            lda Player_State            ;check player's state
-            bne SizeChk                 ;if not on the ground, branch
-            ldy Left_Right_Buttons      ;check left and right
-            beq SizeChk                 ;if neither pressed, branch
-            lda #$00
-            sta Left_Right_Buttons      ;if pressing down while on the ground,
-            sta Up_Down_Buttons         ;nullify directional bits
-SizeChk:    jsr PlayerMovementSubs      ;run movement subroutines
-            ldy #$01                    ;is player small?
-            lda PlayerSize
-            bne ChkMoveDir
-            ldy #$00                    ;check for if crouching
-            lda CrouchingFlag
-            beq ChkMoveDir              ;if not, branch ahead
-            ldy #$02                    ;if big and crouching, load y with 2
-ChkMoveDir: sty Player_BoundBoxCtrl     ;set contents of Y as player's bounding box size control
-            lda #$01                    ;set moving direction to right by default
-            ldy Player_X_Speed          ;check player's horizontal speed
-            beq PlayerSubs              ;if not moving at all horizontally, skip this part
-            bpl SetMoveDir              ;if moving to the right, use default moving direction
-            asl                         ;otherwise change to move to the left
-SetMoveDir: sta Player_MovingDir        ;set moving direction
-PlayerSubs: jsr ScrollHandler           ;move the screen if necessary
-            jsr GetPlayerOffscreenBits  ;get player's offscreen bits
-            jsr RelativePlayerPosition  ;get coordinates relative to the screen
-            ldx #$00                    ;set offset for player object
-            jsr BoundingBoxCore         ;get player's bounding box coordinates
-            jsr PlayerBGCollision       ;do collision detection and process
-            lda Player_Y_Position
-            cmp #$40                    ;check to see if player is higher than 64th pixel
-            bcc PlayerHole              ;if so, branch ahead
-            lda GameEngineSubroutine
-            cmp #$05                    ;if running end-of-level routine, branch ahead
-            beq PlayerHole
-            cmp #$07                    ;if running player entrance routine, branch ahead
-            beq PlayerHole
-            cmp #$04                    ;if running routines $00-$03, branch ahead
-            bcc PlayerHole
-            lda Player_SprAttrib
-            and #%11011111              ;otherwise nullify player's
-            sta Player_SprAttrib        ;background priority flag
-PlayerHole: lda Player_Y_HighPos        ;check player's vertical high byte
-            cmp #$02                    ;for below the screen
-            bmi ExitCtrl                ;branch to leave if not that far down
-            ldx #$01
-            stx ScrollLock              ;set scroll lock
-            ldy #$04
-            sty $07                     ;set value here
-            ldx #$00                    ;use X as flag, and clear for cloud level
-            ldy GameTimerExpiredFlag    ;check game timer expiration flag
-            bne HoleDie                 ;if set, branch
-            ldy CloudTypeOverride       ;check for cloud type override
-            bne ChkHoleX                ;skip to last part if found
-HoleDie:    inx                         ;set flag in X for player death
-            ldy GameEngineSubroutine
-            cpy #$0b                    ;check for some other routine running
-            beq ChkHoleX                ;if so, branch ahead
-            ldy DeathMusicLoaded        ;check value here
-            bne HoleBottom              ;if already set, branch to next part
-            iny
-            sty EventMusicQueue         ;otherwise play death music
-            sty DeathMusicLoaded        ;and set value here
-HoleBottom: ldy #$06
-            sty $07                     ;change value here
-ChkHoleX:   cmp $07                     ;compare vertical high byte with value set here
-            bmi ExitCtrl                ;if less, branch to leave
-            dex                         ;otherwise decrement flag in X
-            bmi CloudExit               ;if flag was clear, branch to set modes and other values
-            ldy EventMusicBuffer        ;check to see if music is still playing
-            bne ExitCtrl                ;branch to leave if so
-            lda #$06                    ;otherwise set to run lose life routine
-            sta GameEngineSubroutine    ;on next frame
-ExitCtrl:   rts                         ;leave
+Swim_SmallBigLeaf:
+    JSR Player_UnderwaterHControl # Do Player left/right input for underwater
+    JSR Player_SwimV # Do Player up/down swimming action
+    JSR Player_SwimAnim # Do Player swim animations
+    RTS         # Return
 
+GndMov_Big:
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
+    JSR Player_SoarJumpFallFrame # Do Player soar/jump/fall frame
+    RTS         # Return
 
-PlayerMovementSubs:
-           lda #$00                  ;set A to init crouch flag by default
-           ldy PlayerSize            ;is player small?
-           bne SetCrouch             ;if so, branch
-           lda Player_State          ;check state of player
-           bne ProcMove              ;if not on the ground, branch 
-           lda Up_Down_Buttons       ;load controller bits for up and down
-           and #%00000100            ;single out bit for down button 
-SetCrouch: sta CrouchingFlag         ;store value in crouch flag
-ProcMove:  jsr PlayerPhysicsSub      ;run sub related to jumping and swimming
-           lda PlayerChangeSizeFlag  ;if growing/shrinking flag set, 
-           bne NoMoveSub             ;branch to leave 
-           lda Player_State
-           cmp #$03                  ;get player state
-           beq MoveSubs              ;if climbing, branch ahead, leave timer unset
-           ldy #$18
-           sty ClimbSideTimer        ;otherwise reset timer now
-MoveSubs:  jsr JumpEngine
+    RTS         # Return?
 
-PlayerPhysicsSub:  
-           lda Player_State          ;check player state
-           cmp #$03
-           bne CheckForJumping       ;if not climbing, branch
-           ldy #$00
-           lda Up_Down_Buttons       ;get controller bits for up/down
-           and Player_CollisionBits  ;check against player's collision detection bits
-           beq ProcClimb             ;if not pressing up or down, branch
-           iny 
-           and #%00001000            ;check for pressing up
-           bne ProcClimb
-           iny 
-ProcClimb: ldx Climb_Y_MForceData,y  ;load value here
-           stx Player_Y_MoveForce    ;store as vertical movement force
-           lda #$08                  ;load default animation timing
-           ldx Climb_Y_SpeedData,y   ;load some other value here
-           stx Player_Y_Speed        ;store as vertical speed  
-           bmi SetCAnim              ;if climbing down, use default animation timing value
-           lsr                       ;otherwise divide timer setting by 2
-SetCAnim:  sta PlayerAnimTimerSet    ;store animation timer setting and leave
-           rts
+GndMov_FireHammer:
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
+    JSR Player_SoarJumpFallFrame # Do Player soar/jump/fall frame
+    JSR Player_ShootAnim # Do Player shooting animation
+    RTS         # Return
 
-CheckForJumping:
-        lda JumpspringAnimCtrl    ;if jumpspring animating,
-        bne NoJump                ;skip ahead to something else
-        lda A_B_Buttons           ;check for A button press
-        and #A_Button
-        beq NoJump                ;if not, branch to something else
-        and PreviousA_B_Buttons   ;if button not pressed in previous frame, branch
-        beq ProcJumping
-NoJump: jmp X_Physics             ;otherwise, jump to something else
+Swim_FireHammer:
+    JSR Player_UnderwaterHControl # Do Player left/right input for underwater
+    JSR Player_SwimV # Do Player up/down swimming action
+    JSR Player_SwimAnim # Do Player swim animations
+    JSR Player_ShootAnim # Do Player shooting animation
+    RTS         # Return
 
-ProcJumping:
-           lda Player_State           ;check player state
-           beq InitJS                 ;if on the ground, branch
-           lda SwimmingFlag           ;if swimming flag not set, jump to do something else
-           beq NoJump                 ;to prevent midair jumping, otherwise continue
-           lda JumpSwimTimer          ;if jump/swim timer nonzero, branch
-           bne InitJS
-           lda Player_Y_Speed         ;check player's vertical speed
-           bpl InitJS                 ;if player's vertical speed motionless or down, branch
-           jmp X_Physics              ;if timer at zero and player still rising, do not swim
-InitJS:    lda #$20                   ;set jump/swim timer
-           sta JumpSwimTimer
-           ldy #$00                   ;initialize vertical force and dummy variable
-           sty Player_YMF_Dummy
-           sty Player_Y_MoveForce
-           lda Player_Y_HighPos       ;get vertical high and low bytes of jump origin
-           sta JumpOrigin_Y_HighPos   ;and store them next to each other here
-           lda Player_Y_Position
-           sta JumpOrigin_Y_Position
-           lda #$01                   ;set player state to jumping/swimming
-           sta Player_State
-           lda Player_XSpeedAbsolute  ;check value related to walking/running speed
-           cmp #$09
-           bcc ChkWtr                 ;branch if below certain values, increment Y
-           iny                        ;for each amount equal or exceeded
-           cmp #$10
-           bcc ChkWtr
-           iny
-ChkWtr:    lda #$01                   ;set value here (apparently always set to 1)
-           sta DiffToHaltJump
-           lda SwimmingFlag           ;if swimming flag disabled, branch
-           beq GetYPhy
-           ldy #$05                   ;otherwise set Y to 5, range is 5-6
-           lda Whirlpool_Flag         ;if whirlpool flag not set, branch
-           beq GetYPhy
-           iny                        ;otherwise increment to 6
-GetYPhy:   lda JumpMForceData,y       ;store appropriate jump/swim
-           sta VerticalForce          ;data here
-           lda FallMForceData,y
-           sta VerticalForceDown
-           lda InitMForceData,y
-           sta Player_Y_MoveForce
-           lda PlayerYSpdData,y
-           sta Player_Y_Speed
-           lda SwimmingFlag           ;if swimming flag disabled, branch
-           beq PJumpSnd
-           lda #Sfx_EnemyStomp        ;load swim/goomba stomp sound into
-           sta Square1SoundQueue      ;square 1's sfx queue
-           lda Player_Y_Position
-           cmp #$14                   ;check vertical low byte of player position
-           bcs X_Physics              ;if below a certain point, branch
-           lda #$00                   ;otherwise reset player's vertical speed
-           sta Player_Y_Speed         ;and jump to something else to keep player
-           jmp X_Physics              ;from swimming above water level
-PJumpSnd:  lda #Sfx_BigJump           ;load big mario's jump sound by default
-           ldy PlayerSize             ;is mario big?
-           beq SJumpSnd
-           lda #Sfx_SmallJump         ;if not, load small mario's jump sound
-SJumpSnd:  sta Square1SoundQueue      ;store appropriate jump sound in square 1 sfx queue
-X_Physics: ldy #$00
-           sty $00                    ;init value here
-           lda Player_State           ;if mario is on the ground, branch
-           beq ProcPRun
-           lda Player_XSpeedAbsolute  ;check something that seems to be related
-           cmp #$19                   ;to mario's speed
-           bcs GetXPhy                ;if =>$19 branch here
-           bcc ChkRFast               ;if not branch elsewhere
-ProcPRun:  iny                        ;if mario on the ground, increment Y
-           lda AreaType               ;check area type
-           beq ChkRFast               ;if water type, branch
-           dey                        ;decrement Y by default for non-water type area
-           lda Left_Right_Buttons     ;get left/right controller bits
-           cmp Player_MovingDir       ;check against moving direction
-           bne ChkRFast               ;if controller bits <> moving direction, skip this part
-           lda A_B_Buttons            ;check for b button pressed
-           and #B_Button
-           bne SetRTmr                ;if pressed, skip ahead to set timer
-           lda RunningTimer           ;check for running timer set
-           bne GetXPhy                ;if set, branch
-ChkRFast:  iny                        ;if running timer not set or level type is water,
-           inc $00                    ;increment Y again and temp variable in memory
-           lda RunningSpeed
-           bne FastXSp                ;if running speed set here, branch
-           lda Player_XSpeedAbsolute
-           cmp #$21                   ;otherwise check player's walking/running speed
-           bcc GetXPhy                ;if less than a certain amount, branch ahead
-FastXSp:   inc $00                    ;if running speed set or speed => $21 increment $00
-           jmp GetXPhy                ;and jump ahead
-SetRTmr:   lda #$0a                   ;if b button pressed, set running timer
-           sta RunningTimer
-GetXPhy:   lda MaxLeftXSpdData,y      ;get maximum speed to the left
-           sta MaximumLeftSpeed
-           lda GameEngineSubroutine   ;check for specific routine running
-           cmp #$07                   ;(player entrance)
-           bne GetXPhy2               ;if not running, skip and use old value of Y
-           ldy #$03                   ;otherwise set Y to 3
-GetXPhy2:  lda MaxRightXSpdData,y     ;get maximum speed to the right
-           sta MaximumRightSpeed
-           ldy $00                    ;get other value in memory
-           lda FrictionData,y         ;get value using value in memory as offset
-           sta FrictionAdderLow
-           lda #$00
-           sta FrictionAdderHigh      ;init something here
-           lda PlayerFacingDir
-           cmp Player_MovingDir       ;check facing direction against moving direction
-           beq ExitPhy                ;if the same, branch to leave
-           asl FrictionAdderLow       ;otherwise shift d7 of friction adder low into carry
-           rol FrictionAdderHigh      ;then rotate carry onto d0 of friction adder high
-ExitPhy:   rts                        ;and then leave
+GndMov_Leaf:
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
+    JSR Player_AnimTailWag # Do Player's tail animations
+    JSR Player_TailAttackAnim # Do Player's tail attack animations
+    RTS         # Return
 
-GetPlayerAnimSpeed:
-            ldy #$00                   ;initialize offset in Y
-            lda Player_XSpeedAbsolute  ;check player's walking/running speed
-            cmp #$1c                   ;against preset amount
-            bcs SetRunSpd              ;if greater than a certain amount, branch ahead
-            iny                        ;otherwise increment Y
-            cmp #$0e                   ;compare against lower amount
-            bcs ChkSkid                ;if greater than this but not greater than first, skip increment
-            iny                        ;otherwise increment Y again
-ChkSkid:    lda SavedJoypadBits        ;get controller bits
-            and #%01111111             ;mask out A button
-            beq SetAnimSpd             ;if no other buttons pressed, branch ahead of all this
-            and #$03                   ;mask out all others except left and right
-            cmp Player_MovingDir       ;check against moving direction
-            bne ProcSkid               ;if left/right controller bits <> moving direction, branch
-            lda #$00                   ;otherwise set zero value here
-SetRunSpd:  sta RunningSpeed           ;store zero or running speed here
-            jmp SetAnimSpd
-ProcSkid:   lda Player_XSpeedAbsolute  ;check player's walking/running speed
-            cmp #$0b                   ;against one last amount
-            bcs SetAnimSpd             ;if greater than this amount, branch
-            lda PlayerFacingDir
-            sta Player_MovingDir       ;otherwise use facing direction to set moving direction
-            lda #$00
-            sta Player_X_Speed         ;nullify player's horizontal speed
-            sta Player_X_MoveForce     ;and dummy variable for player
-SetAnimSpd: lda PlayerAnimTmrData,y    ;get animation timer setting using Y as offset
-            sta PlayerAnimTimerSet
-            rts
+    RTS         # Return?
 
+GndMov_Frog:
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
 
-ImposeFriction:
-           and Player_CollisionBits  ;perform AND between left/right controller bits and collision flag
-           cmp #$00                  ;then compare to zero (this instruction is redundant)
-           bne JoypFrict             ;if any bits set, branch to next part
-           lda Player_X_Speed
-           beq SetAbsSpd             ;if player has no horizontal speed, branch ahead to last part
-           bpl RghtFrict             ;if player moving to the right, branch to slow
-           bmi LeftFrict             ;otherwise logic dictates player moving left, branch to slow
-JoypFrict: lsr                       ;put right controller bit into carry
-           bcc RghtFrict             ;if left button pressed, carry = 0, thus branch
-LeftFrict: lda Player_X_MoveForce    ;load value set here
-           clc
-           adc FrictionAdderLow      ;add to it another value set here
-           sta Player_X_MoveForce    ;store here
-           lda Player_X_Speed
-           adc FrictionAdderHigh     ;add value plus carry to horizontal speed
-           sta Player_X_Speed        ;set as new horizontal speed
-           cmp MaximumRightSpeed     ;compare against maximum value for right movement
-           bmi XSpdSign              ;if horizontal speed greater negatively, branch
-           lda MaximumRightSpeed     ;otherwise set preset value as horizontal speed
-           sta Player_X_Speed        ;thus slowing the player's left movement down
-           jmp SetAbsSpd             ;skip to the end
-RghtFrict: lda Player_X_MoveForce    ;load value set here
-           sec
-           sbc FrictionAdderLow      ;subtract from it another value set here
-           sta Player_X_MoveForce    ;store here
-           lda Player_X_Speed
-           sbc FrictionAdderHigh     ;subtract value plus borrow from horizontal speed
-           sta Player_X_Speed        ;set as new horizontal speed
-           cmp MaximumLeftSpeed      ;compare against maximum value for left movement
-           bpl XSpdSign              ;if horizontal speed greater positively, branch
-           lda MaximumLeftSpeed      ;otherwise set preset value as horizontal speed
-           sta Player_X_Speed        ;thus slowing the player's right movement down
-XSpdSign:  cmp #$00                  ;if player not moving or moving to the right,
-           bpl SetAbsSpd             ;branch and leave horizontal speed value unmodified
-           eor #$ff
-           clc                       ;otherwise get two's compliment to get absolute
-           adc #$01                  ;unsigned walking/running speed
-SetAbsSpd: sta Player_XSpeedAbsolute ;store walking/running speed here and leave
-           rts
+    LDA Player_IsHolding
+    BNE PRG008_AA23     # If Player is holding something, jump to PRG008_AA23
 
-JumpSwimSub:
-          ldy Player_Y_Speed         ;if player's vertical speed zero
-          bpl DumpFall               ;or moving downwards, branch to falling
-          lda A_B_Buttons
-          and #A_Button              ;check to see if A button is being pressed
-          and PreviousA_B_Buttons    ;and was pressed in previous frame
-          bne ProcSwim               ;if so, branch elsewhere
-          lda JumpOrigin_Y_Position  ;get vertical position player jumped from
-          sec
-          sbc Player_Y_Position      ;subtract current from original vertical coordinate
-          cmp DiffToHaltJump         ;compare to value set here to see if player is in mid-jump
-          bcc ProcSwim               ;or just starting to jump, if just starting, skip ahead
-DumpFall: lda VerticalForceDown      ;otherwise dump falling into main fractional
-          sta VerticalForce
-ProcSwim: lda SwimmingFlag           ;if swimming flag not set,
-          beq LRAir                  ;branch ahead to last part
-          jsr GetPlayerAnimSpeed     ;do a sub to get animation frame timing
-          lda Player_Y_Position
-          cmp #$14                   ;check vertical position against preset value
-          bcs LRWater                ;if not yet reached a certain position, branch ahead
-          lda #$18
-          sta VerticalForce          ;otherwise set fractional
-LRWater:  lda Left_Right_Buttons     ;check left/right controller bits (check for swimming)
-          beq LRAir                  ;if not pressing any, skip
-          sta PlayerFacingDir        ;otherwise set facing direction accordingly
-LRAir:    lda Left_Right_Buttons     ;check left/right controller bits (check for jumping/falling)
-          beq JSMove                 ;if not pressing any, skip
-          jsr ImposeFriction         ;otherwise process horizontal movement
-JSMove:   jsr MovePlayerHorizontally ;do a sub to move player horizontally
-          sta Player_X_Scroll        ;set player's speed here, to be used for scroll later
-          lda GameEngineSubroutine
-          cmp #$0b                   ;check for specific routine selected
-          bne ExitMov1               ;branch if not set to run
-          lda #$28
-          sta VerticalForce          ;otherwise set fractional
-ExitMov1: jmp MovePlayerVertically   ;jump to move player vertically, then leave
+    LDA <Player_InAir
+    BEQ PRG008_AA00     # If Player is NOT in mid air, jump to PRG008_AA00
 
+    LDA Player_SandSink
+    LSR A
+    BCS PRG008_AA00     # If bit 0 of Player_SandSink is set, jump to PRG008_AA00
 
-JumpMForceData:
-      .db $20, $20, $1e, $28, $28, $0d, $04
+    LDA #$00
+    STA Player_FrogHopCnt     # Player_FrogHopCnt = 0
 
-FallMForceData:
-      .db $70, $70, $60, $90, $90, $0a, $09
+    LDY #$01     # Y = 1
+    JMP PRG008_AA1E     # Jump to PRG008_AA1E
 
-PlayerYSpdData:
-      .db $fc, $fc, $fc, $fb, $fb, $fe, $ff
+PRG008_AA00:
+    LDA Player_FrogHopCnt
+    BNE PRG008_AA1A     # If Player_FrogHopCnt <> 0, jump to PRG008_AA1A
 
-InitMForceData:
-      .db $00, $00, $00, $00, $00, $80, $00
+    STA <Player_XVel    # Player_XVel = 0
+    LDA <Pad_Holding    
+    AND #(PAD_LEFT | PAD_RIGHT)
+    BEQ PRG008_AA1A     # If Player is not pressing left/right, jump to PRG008_AA1A
 
-MaxLeftXSpdData:
-      .db $d8, $e8, $f0
+    # Play frog hop sound
+    LDA Sound_QPlayer
+    ORA #SND_PLAYERFROG
+    STA Sound_QPlayer
 
-MaxRightXSpdData:
-      .db $28, $18, $10
-      .db $0c ;used for pipe intros
+    LDA #$1f
+    STA Player_FrogHopCnt # Player_FrogHopCnt = $1f
 
-FrictionData:
-      .db $e4, $98, $d0
+PRG008_AA1A:
+    LSR A
+    LSR A
+    LSR A
+    TAY     # Y = Player_FrogHopCnt >> 3
 
-Climb_Y_SpeedData:
-      .db $00, $ff, $01
+PRG008_AA1E:
+    LDA Player_FrogHopFrames,Y    # Get frog frame
+    STA <Player_Frame        # Store as frame
 
-Climb_Y_MForceData:
-      .db $00, $20, $ff
+PRG008_AA23:
+    RTS         # Return
 
+Frog_SwimSoundMask:
+    .byte $03, $07
 
-MoveEnemyHorizontally:
-      inx                         ;increment offset for enemy offset
-      jsr MoveObjectHorizontally  ;position object horizontally according to
-      ldx ObjectOffset            ;counters, return with saved value in A,
-      rts                         ;put enemy offset back in X and leave
+    # Base frame for the different swimming directions of the frog
+Frog_BaseFrame:
+    # Down, Up, Left/Right
+    .byte PF_FROGSWIM_DOWNBASE, PF_FROGSWIM_UPBASE, PF_FROGSWIM_LRBASE
 
-MovePlayerHorizontally:
-      lda JumpspringAnimCtrl  ;if jumpspring currently animating,
-      bne ExXMove             ;branch to leave
-      tax                     ;otherwise set zero for offset to use player's stuff
+    # Frame offset to frames above
+Frog_FrameOffset:
+    .byte $02, $02, $02, $01, $00, $01, $02, $02
 
-MoveObjectHorizontally:
-          lda SprObject_X_Speed,x     ;get currently saved value (horizontal
-          asl                         ;speed, secondary counter, whatever)
-          asl                         ;and move low nybble to high
-          asl
-          asl
-          sta $01                     ;store result here
-          lda SprObject_X_Speed,x     ;get saved value again
-          lsr                         ;move high nybble to low
-          lsr
-          lsr
-          lsr
-          cmp #$08                    ;if < 8, branch, do not change
-          bcc SaveXSpd
-          ora #%11110000              ;otherwise alter high nybble
-SaveXSpd: sta $00                     ;save result here
-          ldy #$00                    ;load default Y value here
-          cmp #$00                    ;if result positive, leave Y alone
-          bpl UseAdder
-          dey                         ;otherwise decrement Y
-UseAdder: sty $02                     ;save Y here
-          lda SprObject_X_MoveForce,x ;get whatever number's here
-          clc
-          adc $01                     ;add low nybble moved to high
-          sta SprObject_X_MoveForce,x ;store result here
-          lda #$00                    ;init A
-          rol                         ;rotate carry into d0
-          pha                         ;push onto stack
-          ror                         ;rotate d0 back onto carry
-          lda SprObject_X_Position,x
-          adc $00                     ;add carry plus saved value (high nybble moved to low
-          sta SprObject_X_Position,x  ;plus $f0 if necessary) to object's horizontal position
-          lda SprObject_PageLoc,x
-          adc $02                     ;add carry plus other saved value to the
-          sta SprObject_PageLoc,x     ;object's page location and save
-          pla
-          clc                         ;pull old carry from stack and add
-          adc $00                     ;to high nybble moved to low
-ExXMove:  rts                         ;and leave
+    # Base velocity for frog swim right/down, left/up
+Frog_Velocity:
+    .byte 16, -16
 
-;-------------------------------------------------------------------------------------
-;$00 - used for downward force
-;$01 - used for upward force
-;$02 - used for maximum vertical speed
+Swim_Frog:
+    LDX #$ff     # X = $FF
 
-MovePlayerVertically:
-         ldx #$00                ;set X for player offset
-         lda TimerControl
-         bne NoJSChk             ;if master timer control set, branch ahead
-         lda JumpspringAnimCtrl  ;otherwise check to see if jumpspring is animating
-         bne ExXMove             ;branch to leave if so
-NoJSChk: lda VerticalForce       ;dump vertical force 
-         sta $00
-         lda #$04                ;set maximum vertical speed here
-         jmp ImposeGravitySprObj ;then jump to move player vertically
+    LDA <Pad_Holding
+    AND #(PAD_UP | PAD_DOWN)
+    BEQ PRG008_AA61     # If Player is NOT pressing up/down, jump to PRG008_AA61
 
-ImposeGravityBlock:
-      ldy #$01       ;set offset for maximum speed
-      lda #$50       ;set movement amount here
-      sta $00
-      lda MaxSpdBlockData,y    ;get maximum speed
+    # 
+    STA <Player_InAir
 
-ImposeGravitySprObj:
-      sta $02            ;set maximum speed here
-      lda #$00           ;set value to move downwards
-      jmp ImposeGravity  ;jump to the code that actually moves it
+    LSR A
+    LSR A
+    LSR A
+    TAX         # X = 1 if pressing up, else 0
 
+    LDA Frog_Velocity,X    # Get base frog velocity
+    BPL PRG008_AA4D     # If value >= 0 (if pressing down), jump to PRG008_AA4D
 
-;$00 - used for downward force
-;$01 - used for upward force
-;$07 - used as adder for vertical position
+    LDY Player_AboveTop
+    BPL PRG008_AA4D     # If Player is not off top of screen, jump to PRG008_AA4D
 
-ImposeGravity:
-         pha                          ;push value to stack
-         lda SprObject_YMF_Dummy,x
-         clc                          ;add value in movement force to contents of dummy variable
-         adc SprObject_Y_MoveForce,x
-         sta SprObject_YMF_Dummy,x
-         ldy #$00                     ;set Y to zero by default
-         lda SprObject_Y_Speed,x      ;get current vertical speed
-         bpl AlterYP                  ;if currently moving downwards, do not decrement Y
-         dey                          ;otherwise decrement Y
-AlterYP: sty $07                      ;store Y here
-         adc SprObject_Y_Position,x   ;add vertical position to vertical speed plus carry
-         sta SprObject_Y_Position,x   ;store as new vertical position
-         lda SprObject_Y_HighPos,x
-         adc $07                      ;add carry plus contents of $07 to vertical high byte
-         sta SprObject_Y_HighPos,x    ;store as new vertical high byte
-         lda SprObject_Y_MoveForce,x
-         clc
-         adc $00                      ;add downward movement amount to contents of $0433
-         sta SprObject_Y_MoveForce,x
-         lda SprObject_Y_Speed,x      ;add carry to vertical speed and store
-         adc #$00
-         sta SprObject_Y_Speed,x
-         cmp $02                      ;compare to maximum speed
-         bmi ChkUpM                   ;if less than preset value, skip this part
-         lda SprObject_Y_MoveForce,x
-         cmp #$80                     ;if less positively than preset maximum, skip this part
-         bcc ChkUpM
-         lda $02
-         sta SprObject_Y_Speed,x      ;keep vertical speed within maximum value
-         lda #$00
-         sta SprObject_Y_MoveForce,x  ;clear fractional
-ChkUpM:  pla                          ;get value from stack
-         beq ExVMove                  ;if set to zero, branch to leave
-         lda $02
-         eor #%11111111               ;otherwise get two's compliment of maximum speed
-         tay
-         iny
-         sty $07                      ;store two's compliment here
-         lda SprObject_Y_MoveForce,x
-         sec                          ;subtract upward movement amount from contents
-         sbc $01                      ;of movement force, note that $01 is twice as large as $00,
-         sta SprObject_Y_MoveForce,x  ;thus it effectively undoes add we did earlier
-         lda SprObject_Y_Speed,x
-         sbc #$00                     ;subtract borrow from vertical speed and store
-         sta SprObject_Y_Speed,x
-         cmp $07                      ;compare vertical speed to two's compliment
-         bpl ExVMove                  ;if less negatively than preset maximum, skip this part
-         lda SprObject_Y_MoveForce,x
-         cmp #$80                     ;check if fractional part is above certain amount,
-         bcs ExVMove                  ;and if so, branch to leave
-         lda $07
-         sta SprObject_Y_Speed,x      ;keep vertical speed within maximum value
-         lda #$ff
-         sta SprObject_Y_MoveForce,x  ;clear fractional
-ExVMove: rts                          ;leave!
+    LDA #$00     # A = 0
+
+PRG008_AA4D:
+    LDY <Pad_Holding
+    BPL PRG008_AA52     # If Player is not pressing 'A', jump to PRG008_AA52
+
+    ASL A         # Double vertical speed
+
+PRG008_AA52:
+    CMP #(PLAYER_FROG_MAXYVEL+1)
+    BLT PRG008_AA5C     
+
+    LDY <Player_InAir
+    BNE PRG008_AA5C     # If Player is swimming above ground, jump to PRG008_AA5C
+
+    LDA #PLAYER_FROG_MAXYVEL     # Cap swim speed
+
+PRG008_AA5C:
+    STA <Player_YVel # Set Y Velocity
+    JMP PRG008_AA6E     # Jump to PRG008_AA6E
+
+PRG008_AA61:
+    LDY <Player_YVel
+    BEQ PRG008_AA6E     # If Y Velocity = 0, jump to PRG008_AA6E
+
+    INY         # Y++
+
+    LDA <Player_YVel
+    BMI PRG008_AA6C     # If Player_YVel < 0, jump to PRG008_AA6C
+
+    DEY
+    DEY         # Y -= 2
+
+PRG008_AA6C:
+    STY <Player_YVel # Update Y Velocity
+
+PRG008_AA6E:
+    LDA <Pad_Holding
+    AND #(PAD_LEFT | PAD_RIGHT)
+    BEQ PRG008_AA84     # If Player is not pressing left or right, jump to PRG008_AA84
+
+    # Player is pressing left/right...
+
+    LSR A
+    TAY
+    LDA Frog_Velocity,Y    # Get base frog velocity
+
+    LDY <Pad_Holding
+    BPL PRG008_AA7E     # If Player is not pressing 'A', jump to PRG008_AA7E
+
+    ASL A         # Double horizontal velocity
+
+PRG008_AA7E:
+    STA <Player_XVel # Update X Velocity
+
+    LDX #$02     # X = 2
+    BNE PRG008_AA9C     # Jump (technically always) to PRG008_AA9C
+
+PRG008_AA84:
+    LDY <Player_XVel
+    BEQ PRG008_AA94     # If Player is not moving horizontally, jump to PRG008_AA94
+
+    INY         # Y++
+
+    LDA <Player_XVel
+    BMI PRG008_AA8F     # If Player_XVel < 0, jump to PRG008_AA8F
+
+    DEY
+    DEY         # Y -= 2
+
+PRG008_AA8F:
+    STY <Player_XVel # Update X Velocity
+    JMP PRG008_AA9C     # Jump to PRG008_AA9C
+
+PRG008_AA94:
+    LDA <Player_InAir
+    BNE PRG008_AA9C     # If Player is swimming above ground, jump to PRG008_AA9C
+
+    LDA #$15     # A = $15
+    BNE PRG008_AAD2     # Jump (technically always) to PRG008_AAD2
+
+PRG008_AA9C:
+    TXA         
+    BMI PRG008_AAC8     # If X < 0, jump to PRG008_AAC8
+
+    LDA <Counter_1
+    LSR A
+    LSR A
+
+    LDY #$00     # Y = 0
+
+    BIT <Pad_Holding
+    BMI PRG008_AAAB     # If Player is holding 'A', jump to PRG008_AAAB
+
+    LSR A         # Otherwise, reduce velocity adjustment
+    INY         # Y++
+
+PRG008_AAAB:
+    AND #$07
+    TAY    
+    BNE PRG008_AABF    
+
+    LDA <Counter_1
+    AND Frog_SwimSoundMask,Y
+    BNE PRG008_AABF     # If timing is not right for frog swim sound, jump to PRG008_AABF
+
+    # Play swim sound
+    LDA Sound_QPlayer
+    ORA #SND_PLAYERSWIM
+    STA Sound_QPlayer
+
+PRG008_AABF:
+    LDA Frog_BaseFrame,X
+    ADD Frog_FrameOffset,Y
+    BNE PRG008_AAD2
+
+PRG008_AAC8:
+    LDY #PF_FROGSWIM_IDLEBASE
+
+    LDA <Counter_1
+    AND #$08
+    BEQ PRG008_AAD1
+
+    INY
+
+PRG008_AAD1:
+    TYA
+
+PRG008_AAD2:
+    STA <Player_Frame # Update Player_Frame
+    RTS         # Return
+
+GndMov_Tanooki:
+    JSR Player_TanookiStatue  # Change into/maintain Tanooki statue (NOTE: Will not return here if statue!)
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
+    JSR Player_AnimTailWag # Do Player's tail animations
+    JSR Player_TailAttackAnim # Do Player's tail attack animations
+    RTS         # Return
+
+Swim_Tanooki:
+    JSR Player_TanookiStatue # Change into/maintain Tanooki statue (NOTE: Will not return here if statue!)
+    JSR Player_UnderwaterHControl # Do Player left/right input for underwater
+    JSR Player_SwimV # Do Player up/down swimming action
+    JSR Player_SwimAnim # Do Player swim animations
+    RTS         # Return
+
+Move_Kuribo:
+    JSR Player_GroundHControl # Do Player left/right input control
+    JSR Player_JumpFlyFlutter # Do Player jump, fly, flutter wag
+
+    LDA <Player_InAir
+    BNE PRG008_AAFF     # If Player is mid air, jump to PRG008_AAFF
+
+    STA Player_KuriboDir     # Clear Player_KuriboDir
+
+PRG008_AAFF:
+    LDA Player_KuriboDir
+    BNE PRG008_AB17     # If Kuribo's shoe is moving, jump to PRG008_AB17
+
+    LDA <Player_InAir
+    BNE PRG008_AB25     # If Player is mid air, jump to PRG008_AB25
+
+    LDA <Pad_Holding
+    AND #(PAD_LEFT | PAD_RIGHT)
+    STA Player_KuriboDir     # Store left/right pad input -> Player_KuriboDir
+    BEQ PRG008_AB25         # If Player is not pressing left or right, jump to PRG008_AB25
+    INC <Player_InAir     # Flag as in air (Kuribo's shoe bounces along)
+
+    LDY #-$20
+    STY <Player_YVel     # Player_YVel = -$20
+
+PRG008_AB17:
+    LDA <Pad_Input
+    BPL PRG008_AB25     # If Player is NOT pressing 'A', jump to PRG008_AB25
+
+    LDA #$00
+    STA Player_KuriboDir     # Player_KuriboDir = 0
+
+    LDY Player_RootJumpVel     # Get initial jump velocity
+    STY <Player_YVel     # Store into Y velocity
+
+PRG008_AB25:
+    LDY <Player_Suit
+    BEQ PRG008_AB2B     # If Player is small, jump to PRG008_AB2B
+
+    LDY #$01     # Otherwise, Y = 1
+
+PRG008_AB2B:
+
+    # Y = 0 if small, 1 otherwise
+
+    LDA Player_KuriboFrame,Y    # Get appropriate Kuribo's shoe frame
+    STA <Player_Frame        # Store as active Player frame
+
+    LDA <Counter_1
+    AND #$08    
+    BEQ PRG008_AB38         # Every 8 ticks, jump to PRG008_AB38
+
+    INC <Player_Frame    # Player_Frame++
+
+PRG008_AB38:
+    RTS         # Return
+
+sub force_signed {
+    my $ref = shift;
+    my $ob = B::svref_2object( $ref ) or die;
+    # define SVf_IVisUV  0x80000000  /* use XPVUV instead of XPVIV */
+    $ob->FLAGS( $ob->FLAGS & ~ 0x80000000 );
+}
+
+sub force_unsigned {
+    my $ref = shift;
+    my $ob = B::svref_2object( $ref ) or die;
+    # define SVf_IVisUV  0x80000000  /* use XPVUV instead of XPVIV */
+    $ob->FLAGS( $ob->FLAGS | 0x80000000 );
+}
 
