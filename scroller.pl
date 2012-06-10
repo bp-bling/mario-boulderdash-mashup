@@ -1007,7 +1007,7 @@ sub Player_Control {
         $a = 0x08;
         $Temp_Var11 = $a;              # Temp_Var11 (X offset) = 8
         Player_GetTileAndSlope();      # Get tile above Player
-        $Level_Tile_Positions->[ 0 ] = [ ($Player_Y >> 4) + $Temp_Var10, ($Player_X >> 4) + $Temp_Var11  ]; # hacked up
+        $Level_Tile_Positions->[ 0 ] = [ ($Player_X >> 4) + $Temp_Var11, ($Player_Y >> 4) + $Temp_Var10  ]; # hacked up
         $Level_Tile_Head = $a;         # -> Level_Tile_Head ; sdw: this variable seems to be the space the players head occupies and isn't used for much except for low-clearance detection; in normal play, it never is anything but space
 # warn ">>$a<< -- 'Get tile above Player' -- actually, tile where the players head is"; # XXX this never ever gets set to anything
         $Temp_Var1 = $a;               # -> Temp_Var1
@@ -2031,7 +2031,7 @@ sub Player_GetTileAndSlope {
     #     JSR Player_GetTileAndSlope_Normal    ; Set Level_Tile and Player_Slopes; ... this sets Level_Tile and A
     # JSR Player_GetTileV  ; Get tile, set Level_Tile
     $a = $map->[$x]->[$y]; # XXX okay, where do we stick this?  A, it looks like, and $Level_Tile too, but so far, it's only a temp nothing uses
-warn "-->$a<-- Player_GetTileAndSlope for delta $Temp_Var11, $Temp_Var10";
+# warn "-->$a<-- Player_GetTileAndSlope for delta $Temp_Var11, $Temp_Var10";
 }
 
 
@@ -2130,7 +2130,7 @@ sub Player_DetectSolids {
     Player_GetTileAndSlope();     # Get tile
     ${ $Level_Tile_Array->[ $x + 1 ] } = $a;    # STA Level_Tile_GndL,X     # Store i; sdw Level_Tile_GndL is at offset 1 in the array, so +1
 
-    $Level_Tile_Positions->[ $x + 1 ] = [ ($Player_Y >> 4) + $Temp_Var10, ($Player_X >> 4) + $Temp_Var11  ]; # hacked up
+    $Level_Tile_Positions->[ $x + 1 ] = [ ($Player_X >> 4) + $Temp_Var11, ($Player_Y >> 4) + $Temp_Var10  ]; # hacked up
 
     push @stack, $a;  # PHA         # Save tile
 
@@ -2219,7 +2219,7 @@ sub Player_DetectSolids {
     $y = 0;     # Y = 0
 
     Level_CheckGndLR_TileGTAttr();
-    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A; sdw: not touching a solid tile with our feet
+    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A; sdw: not touching a solid tile with our feet... yes, feet.  checked carefully.  odd as it is, if we're going upwards and our feet hit something, we've hit a block
 
     $y++;         # Y = 1
     $Player_HitCeiling = $y;    # Flag Player as having just hit head off ceiling
@@ -2234,7 +2234,6 @@ sub Player_DetectSolids {
   # PRG008_B558:
     # STA <Player_YVel # Update Player_YVel
     $Player_YVel = 1;
-die;
 
   PRG008_B55A:
     return;
@@ -2345,7 +2344,7 @@ sub Level_CheckGndLR_TileGTAttr {
     $carry = 1 if $y == 2 and ( $tile_properties{ $tile1 }->{solid_bottom} or $tile_properties{ $tile2 }->{solid_bottom} ); # $y = 2 for front; solid bottom and solid sides are the same thing
 # warn "tile ``$tile1'' with y=$y is solid top: " . $tile_properties{ $tile1 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile1 }->{solid_bottom};
 # warn "tile ``$tile2'' with y=$y is solid top: " . $tile_properties{ $tile2 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile2 }->{solid_bottom};
-warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing ($y=) " . ( $y == 0 ? "feet" : "front" );
+# warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing ($y=) " . ( $y == 0 ? "feet" : "front" );
     #  XXX the head collision check is made elsewhere
 
   PRG008_B5D0:
@@ -2546,7 +2545,7 @@ sub Level_DoCommonSpecialTiles {
     # Not an ice block or if it was, Player was not interested in it...
 
     $a = ${ $Level_Tile_Array->[ $x+1 ] };   # LDA Level_Tile_GndL,X
-warn ">>$a<<  " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
+# warn ">>$a<<  " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
     # CMP #TILEA_COIN # XXX
     goto PRG008_B623; # XXX # BNE PRG008_B623     # If Player is not touching coin, jump to PRG008_B623
 
@@ -2635,10 +2634,12 @@ sub Level_DoBumpBlocks {
     # BPL PRG008_B6EF  ; If Player is moving downward, jump to PRG008_B6EF
 
     $a = ${ $Level_Tile_Array->[ $x + 1 ] };
-    # warn ">>$a<<  " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
+warn ">>$a<< Player_YVel = $Player_YVel Level_DoBumpBlocks " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
     # $tile_properties{ $a }->{hittable} ...
-    if( $a eq 'X' and $Player_Y > 0 ) {
+    if( $a eq 'X' and $Player_YVel < 0 and ( $x == 0 or $x == 1 ) ) {
         (my $x, my $y ) = @{ $Level_Tile_Positions->[ $x + 1 ] };
+        $x >>= 4;
+        $y >>= 4;
         $map->[$x]->[$y] = ' '; 
     }
 }
