@@ -5,7 +5,6 @@ use warnings;
 
 TODO:
 
-o. currently, Mario takes off like a rocket if he changes direction in mid air with jump held -- look for velocity table misuse?
 o. we're hoovering about five pixels above the ground
 o. need to use small mario graphic
 o. Player_Draw
@@ -47,22 +46,40 @@ $app->update();
 
 my @update_rects = ();
 
+#my $sprite = SDLx::Sprite::Animated->new(
+#    image           => 'data/m.bmp',
+#    rect            => SDL::Rect->new( 0, 0, 16, 28 ),
+#    ticks_per_frame => 6,
+#    alpha_key       => SDL::Color->new(139, 0, 139),
+#);
+
+#$sprite->set_sequences(
+#    left  => [ [ 0, 1 ], [ 1, 1 ], [ 2, 1 ], [ 3, 1 ], [ 4, 1 ] ],
+#    right => [ [ 0, 0 ], [ 1, 0 ], [ 2, 0 ], [ 3, 0 ], [ 4, 0 ] ],
+#    stopl => [ [ 0, 1 ] ],
+#    stopr => [ [ 0, 0 ] ],
+#    jumpr => [ [ 5, 0 ] ],
+#    jumpl => [ [ 8, 1 ] ],
+#    duckr => [ [ 6, 0 ] ],
+#    duckl => [ [ 6, 1 ] ],
+#);
+
 my $sprite = SDLx::Sprite::Animated->new(
-    image           => 'data/m.bmp',
-    rect            => SDL::Rect->new( 0, 0, 16, 28 ),
+    image           => 'mario.ppm',
+    rect            => SDL::Rect->new( 0, 0, 16, 18 ),
     ticks_per_frame => 6,
-    alpha_key       => SDL::Color->new(139, 0, 139),
+    alpha_key       => SDL::Color->new(0, 255, 255),
 );
 
 $sprite->set_sequences(
-    left  => [ [ 0, 1 ], [ 1, 1 ], [ 2, 1 ], [ 3, 1 ], [ 4, 1 ] ],
-    right => [ [ 0, 0 ], [ 1, 0 ], [ 2, 0 ], [ 3, 0 ], [ 4, 0 ] ],
-    stopl => [ [ 0, 1 ] ],
-    stopr => [ [ 0, 0 ] ],
+    left  => [ [ 12, 1, ], [ 11, 1, ] ],
+    right => [ [ 3, 0 ], [ 2, 0 ] ],
+    stopl => [ [ 11, 1 ] ],
+    stopr => [ [ 2, 0 ] ],
     jumpr => [ [ 5, 0 ] ],
-    jumpl => [ [ 5, 1 ] ],
-    duckr => [ [ 6, 0 ] ],
-    duckl => [ [ 6, 1 ] ],
+    jumpl => [ [ 9, 1 ] ],
+    duckr => [ [ 3, 0 ] ],
+    duckl => [ [ 1, 1 ] ],
 );
 
 $sprite->sequence('stopr');
@@ -122,8 +139,8 @@ my $PLAYER_TAILWAG_YVEL    = 0x10;  # The Y velocity that the tail wag attempts 
 my $PF_JUMPFALLSMALL   = 0x40;   # Standard jump/fall frame when small
 my $PF_FASTJUMPFALLSMALL       = 0x4E;  # "Fast" jump/fall frame when small
 
-my $PAD_A       = 0x80;
-my $PAD_B       = 0x40;
+my $PAD_A       = 0x80;  # bit 7; BIT puts this bit into N 
+my $PAD_B       = 0x40;  # bit 6; BIT puts this bit into V
 my $PAD_SELECT  = 0x20;                  
 my $PAD_START   = 0x10;
 my $PAD_UP      = 0x08;
@@ -187,6 +204,16 @@ my $Player_SpeedJumpInc = [    0x00, 0x02, 0x04, 0x08 ];
 my $PRG008_AC22 = [ # XXX give this a better name
      0xD0, 0xCE, 0xCC, 0xCA, 0xCA, 0xCA
 ];
+
+my $Level_Tile_Head        = 0;    # Tile at Player's head
+my $Level_Tile_GndL        = 0;    # Tile at Player's feet left
+my $Level_Tile_GndR        = 0;    # Tile at Player's feet right
+my $Level_Tile_InFL        = 0;    # Tile "in front" of Player ("lower", at feet)
+my $Level_Tile_InFU        = 0;    # Tile "in front" of Player ("upper", at face)
+# Level_Tile_Array, except for $Level_Tile_Head, has things the positions in the same order as $TileAttrAndQuad_OffsFlat.  A loop loops over those and this at the same time, calling Player_GetTileAndSlope() with those offsets to populate these variables
+my $Level_Tile_Array = [ \$Level_Tile_Head, \$Level_Tile_GndL, \$Level_Tile_GndR, \$Level_Tile_InFL, \$Level_Tile_InFU, ]; # sdw: using this instead for calls like this:  LDA Level_Tile_Head,X
+# my $Level_Tile_Quad = [ 0, 0, 0, 0 ];  # $0608-$060B Quadrant of tile for each of the positions above XXX; not sure I'm using quadrants to do tile attributes; okay, not using quadrants to do tile attributes
+my $Level_Tile_Positions = [];           # hacked up; X, Y coordinates of where observed blocks are
 
 #    ; Offsets used for tile detection in non-sloped levels
 #    ; +16 if moving downward
@@ -254,12 +281,7 @@ my $Read_Joypads_UnkTable = [ 0x00, 0x01, 0x02, 0x00, 0x04, 0x05, 0x06, 0x04, 0x
 
 my $pressed                = {};      # some combination of left/right/up/down
 #my $lockjump               = 0;       # has jumped, hasn't hit the ground yet
-#my $vel_x                  = 100;     # X speed when walking/jumping
-#my $vel_y                  = -102;    # Y (initial) speed when jumping
 my $quit                   = 0;
-#my $gravity                = 190;     # gravitational constant; was 180
-#my $gravity_delay          = 0;       # countdown, initialized from $gravity_delay_constant, before gravity kicks in for the current jump
-#my $gravity_delay_constant = 120;
 my $dashboard              = '';      # debug message to display on-screen
 my $w                      = 16;      # mario width
 my $h                      = 28;      # mario height (but not necessarily block height, which is/was 20)
@@ -268,6 +290,7 @@ my $block_height           = 20;
 #my $scroller               = 0;       # movement backlogged to recenter the screen
 
 my $Counter_1              = 0;       # This value simply increments every frame, used for timing various things
+my $Counter_Wiggly         = 0;      # "Wiggly" counter, provides rippled movement (like the airship rising durin g its intro)
 
 my $Player_InAir           = 0;      # When set, Player is in the air
 my $Player_InAir_OLD       = 0;
@@ -307,8 +330,10 @@ my $Player_IsHolding       = 0;      # Set when Player is holding something (ani
 my $Player_IsClimbing      = 0;      # Set when Player is climing vine
 my $Player_WalkAnimTicks   = 0;      # Ticks between animation frames of walking; max value varies by Player's X velocity
 my $Player_HitCeiling      = 0;      # Flag set when Player has just hit head off ceiling
-my $Kill_Tally             = 0;      # Counter that increases with each successful hit of an object without touching the ground
+my $Player_LowClearance    = 0;      # Set when Player is in a "low clearance" situation (big Mario in a single block high tunnel)
 my $Player_Current         = 0;      # Which Player is currently up (0 = Mario, 1 = Luigi)
+
+my $Kill_Tally             = 0;      # Counter that increases with each successful hit of an object without touching the ground
 
 # Player_Behind_En:
 # Specifies whether the "Behind the scenes" effect is actually active
@@ -316,21 +341,9 @@ my $Player_Current         = 0;      # Which Player is currently up (0 = Mario, 
 # still active, but he won't get the effect of it!
 my $Player_Behind_En       = 0;
 my $Player_Behind          = 0;      # When non-zero, Player is "behind the scenes" (as by white block)
-my $Player_LowClearance    = 0;      # Set when Player is in a "low clearance" situation (big Mario in a single block high tunnel)
 my  $Level_PipeMove = 0; # see asm; long desc of how targets are encoded
 
 my $Level_SlopeEn          = 0;      # If set, enables slope tiles (otherwise they're considered flat top-only solids)
-
-my $Level_Tile_Head        = 0;    # Tile at Player's head
-my $Level_Tile_GndL        = 0;    # Tile at Player's feet left
-my $Level_Tile_GndR        = 0;    # Tile at Player's feet right
-my $Level_Tile_InFL        = 0;    # Tile "in front" of Player ("lower", at feet)
-my $Level_Tile_InFU        = 0;    # Tile "in front" of Player ("upper", at face)
-my $Level_Tile_Array = [ \$Level_Tile_Head, \$Level_Tile_GndL, \$Level_Tile_GndR, \$Level_Tile_InFL, \$Level_Tile_InFU, ]; # sdw: using this instead for calls like this:  LDA Level_Tile_Head,X
-# my $Level_Tile_Quad = [ 0, 0, 0, 0 ];  # $0608-$060B Quadrant of tile for each of the positions above XXX; not sure I'm using quadrants to do tile attributes
-
-
-my $Counter_Wiggly         = 0;      # "Wiggly" counter, provides rippled movement (like the airship rising durin g its intro)
 
 my $Pad_Holding            = 0;      # Active player's inputs (i.e. 1P or 2P, whoever's playing) buttons being held in (continuous)
 my $Pad_Input              = 0;      # Active player's inputs (i.e. 1P or 2P, whoever's playing) buttons newly pressed only (one shot)
@@ -350,10 +363,242 @@ my $Temp_Var16             = 0;
 my $Temp_VarNP0            = 0;      # A temporary not on page 0; sdw: also: If did not use "high" Y last call to Player_GetTileAndAttr
 
 #
+#
+#
+
+# Commons (not really comprehensive)
+my $TILEA_NOTEINVIS        = 0x03;    # Invisible (until hit) note block
+
+my $TILEA_NOTE        = 0x2E;    # Standard note block
+my $TILEA_NOTEFLOWER    = 0x2F;    # Note block with fire flower
+my $TILEA_NOTELEAF        = 0x30;    # Note block with leaf
+my $TILEA_NOTESTAR        = 0x31;    # Note block with star
+my $TILEA_ICEBRICK        = 0x32;    # Ice block
+my $TILEA_ICEBLOCK        = 0x32;
+
+my $TILEA_COIN        = 0x40;    # Coin
+my $TILEA_COINREMOVED    = 0x41;    # Tile used after coin has been collected
+my $TILEA_DOOR1        = 0x42;    # Doorway 1, typically black in appearance (apparently wired to only work in fortresses)
+my $TILEA_DOOR2        = 0x43;    # Doorway 2, typically red in appearance
+my $TILEA_INVISCOIN        = 0x44;    # Invisible coin block
+my $TILEA_INVIS1UP        = 0x45;    # Invisible 1-up
+my $TILEA_NOTECOINHEAVEN    = 0x46;    # Placeholder for invisible note block that takes you to coin heaven
+
+my $TILEA_BLOCKEMPTY    = 0x5F;    # Used up ? block type empty block
+
+my $TILEA_QBLOCKFLOWER    = 0x60;    # ? block with fire flower
+my $TILEA_QBLOCKLEAF    = 0x61;    # ? block with leaf
+my $TILEA_QBLOCKSTAR    = 0x62;    # ? block with star
+my $TILEA_QBLOCKCOIN    = 0x63;    # ? block with coin
+my $TILEA_QBLOCKCOINSTAR    = 0x64;    # ? block with coin OR star
+my $TILEA_QBLOCKCOIN2    = 0x65;    # ? block with coin (again??)
+my $TILEA_MUNCHER        = 0x66;    # Muncher plant!
+my $TILEA_BRICK        = 0x67;    # Standard brick
+my $TILEA_BRICKFLOWER    = 0x68;    # Brick containing fire flower
+my $TILEA_BRICKLEAF        = 0x69;    # Brick containing leaf
+my $TILEA_BRICKSTAR        = 0x6A;    # Brick containing star
+my $TILEA_BRICKCOIN        = 0x6B;    # Brick containing single coin
+my $TILEA_BRICKCOINSTAR    = 0x6C;    # Brick containing single coin OR star
+my $TILEA_BRICK10COIN    = 0x6D;    # Brick with 10 coins
+my $TILEA_BRICK1UP        = 0x6E;    # Brick with 1-up
+my $TILEA_BRICKVINE        = 0x6F;    # Brick with vine
+my $TILEA_BRICKPSWITCH    = 0x70;    # Brick with P Switch
+my $TILEA_HNOTE        = 0x71;    # Coin Heaven launcher note block
+my $TILEA_WOODBLOCKBOUNCE    = 0x72;    # Wood block which bounces (no contents)
+my $TILEA_WOODBLOCKFLOWER    = 0x73;    # Wood block which bounces and contains fire flower
+my $TILEA_WOODBLOCKLEAF    = 0x74;    # Wood block which bounces and contains leaf
+my $TILEA_WOODBLOCKSTAR    = 0x75;    # Wood block which bounces and contains star
+
+my $TILEA_WOODBLOCK        = 0x79;    # Standard solid wood block
+
+my $TILEA_GNOTE        = 0xBC;    # Green note block (functions like standard white, just colored wrong)
+
+my $TILEA_PSWITCH_BLANK    = 0xC1;    # Blank tile used to hide a P-Switch after it has been used on level reload
+
+my $TILEA_PATH_HORZ        = 0xC8;    # Horizontal path (typical)
+my $TILEA_PATH_VERT        = 0xC9;    # Vertical path (typical)
+my $TILEA_PATH_45T2B    = 0xCA;    # 45 degree path top-to-bottom (typical)
+my $TILEA_PATH_45B2T    = 0xCB;    # 45 degree path bottom-to-top (typical)
+my $TILEA_PATH_625T2B_U    = 0xCC;    # 62.5 degree path top-to-bottom, upper half (typical)
+my $TILEA_PATH_625T2B_L    = 0xCD;    # 62.5 degree path top-to-bottom, lower half (typical)
+my $TILEA_PATH_625B2T_U    = 0xCE;    # 62.5 degree path bottom-to-top, upper half (typical)
+my $TILEA_PATH_625B2T_L    = 0xCF;    # 62.5 degree path bottom-to-top, lower half (typical)
+
+my $TILEA_PSWITCH_PRESSED    = 0xD7;    # Referenced pressed P-Switch
+my $TILEA_PSWITCH        = 0xF2;        # P-Switch
+my $TILEA_BLOCKBUMP_CLEAR    = 0xF3;    # Tile used when a "bump" block (e.g. ? blocks, note block, etc.) is hit
+
+#
+
+# Tileset 1 (Plains style)
+my $TILE1_GOALBLACK        = 0x00;    # Black background of goal area
+my $TILE1_GOALEDGE        = 0x01;    # > shape goal edge
+my $TILE1_SKYALT        = 0x02;    # ?? Referenced, appears as sky?
+
+my $TILE1_LITTLEFENCE    = 0x04;    # Little fence (runs atop the 'oo' type cheep-cheep bridge)
+my $TILE1_ABOVEFENCE    = 0x05;    # Above little fence ?? (it appears empty)
+my $TILE1_LILBGCLOUD    = 0x06;    # Little background cloud
+my $TILE1_WBLOCKLV        = 0x07;    # White big block left vertical runner
+my $TILE1_WBLOCKRV        = 0x08;    # White big block right vertical runner
+my $TILE1_WBLOCKM        = 0x09;    # White big block center
+my $TILE1_WBLOCKBH        = 0x0A;    # White big block bottom horizontal runner
+my $TILE1_WBLOCK_SHUR    = 0x0B;    # White big block shadowed on by another
+my $TILE1_WBLOCKSM        = 0x0C;    # White big block shadow middle
+my $TILE1_WBLOCKLL        = 0x0D;    # White big block lower-left
+my $TILE1_WBLOCKLR        = 0x0E;    # White big block lower-right
+my $TILE1_WBLOCKSB        = 0x0F;    # White big block shadow bottom
+
+my $TILE1_PUPCLOUD_M    = 0x10;    # "Power Up Cloud" Mushroom
+my $TILE1_PUPCLOUD_F    = 0x11;    # "Power Up Cloud" Flower
+my $TILE1_PUPCLOUD_S    = 0x12;    # "Power Up Cloud" Star
+
+my $TILE1_CLOUD_UL        = 0x1F;    # Cloud upper left
+my $TILE1_CLOUD_UM        = 0x20;    # Cloud upper middle
+my $TILE1_CLOUD_UR        = 0x21;    # Cloud upper right
+my $TILE1_CLOUD_LL        = 0x22;    # Cloud lower left
+my $TILE1_CLOUD_LM        = 0x23;    # Cloud lower middle
+my $TILE1_CLOUD_LR        = 0x24;    # Cloud lower right
+
+my $TILE1_WBLOCKUL        = 0x26;    # White big block upper-left
+my $TILE1_WBLOCKTH        = 0x25;    # White big block top horizontal runner
+my $TILE1_WBLOCKUR        = 0x27;    # White big block upper-right
+
+my $TILE1_JCLOUD        = 0x2C;    # Judgem's style cloud, solid on top only
+my $TILE1_JCLOUDSOLID    = 0x2D;    # Judgem's style cloud, solid all around
+
+my $TILE1_OBLOCKLV        = 0x47;    # Orange big block left vertical runner
+my $TILE1_OBLOCKRV        = 0x48;    # Orange big block right vertical runner
+my $TILE1_OBLOCKM        = 0x49;    # Orange big block center
+my $TILE1_OBLOCKBH        = 0x4A;    # Orange big block bottom horizontal runner
+my $TILE1_OBLOCK_SHUR    = 0x4B;    # Orange big block shadowed on by another
+my $TILE1_OBLOCKSM        = 0x4C;    # Orange big block shadow middle
+my $TILE1_OBLOCKLL        = 0x4D;    # Orange big block lower-left
+my $TILE1_OBLOCKLR        = 0x4E;    # Orange big block lower-right
+my $TILE1_OBLOCKSB        = 0x4F;    # Orange big block shadow bottom
+my $TILE1_OBLOCKUL        = 0x51;    # Orange big block upper-left
+my $TILE1_OBLOCKTH        = 0x50;    # Orange big block top horizontal runner
+my $TILE1_OBLOCKUR        = 0x52;    # Orange big block upper-right
+
+my $TILE1_GROUNDTM        = 0x53;    # Ground top middle
+my $TILE1_GROUNDMM        = 0x54;    # Ground middle-middle
+my $TILE1_GROUNDTL        = 0x55;    # Ground top left
+my $TILE1_GROUNDML        = 0x56;    # Ground middle-left
+my $TILE1_GROUNDTR        = 0x57;    # Ground top right
+my $TILE1_GROUNDMR        = 0x58;    # Ground middle-right
+
+my $TILE1_CANNONTOP1    = 0x76;    # Upper top of cannon
+my $TILE1_CANNONTOP2    = 0x77;    # Lower top of cannon
+my $TILE1_CANNONMID        = 0x78;    # Mid part to ground
+
+my $TILE1_SANDTOP        = 0x7A;    # Solid sand ground, top
+my $TILE1_SANDMID        = 0x7B;    # Solid sand ground, middle
+
+my $TILE1_SKY        = 0x80;    # Official sky tile
+
+my $TILE1_VINE        = 0x85;    # Vine
+my $TILE1_LITTLE_BUSH    = 0x86;    # The little green bush
+
+my $TILE1_GBLOCKLV        = 0x87;    # Green big block left vertical runner
+my $TILE1_GBLOCKRV        = 0x88;    # Green big block right vertical runner
+
+my $TILE1_GBLOCKM        = 0x89;    # Green big block center
+my $TILE1_GBLOCKBH        = 0x8A;    # Green big block bottom horizontal runner
+my $TILE1_GBLOCK_SHUR    = 0x8B;    # Green big block shadowed on by another
+my $TILE1_GBLOCKSM        = 0x8C;    # Green big block shadow middle
+my $TILE1_GBLOCKLL        = 0x8D;    # Green big block lower-left
+my $TILE1_GBLOCKLR        = 0x8E;    # Green big block lower-right
+my $TILE1_GBLOCKSB        = 0x8F;    # Green big block shadow bottom
+
+my $TILE1_BUSH_UL        = 0x90;    # Bush upper left
+my $TILE1_BUSH_UR        = 0x91;    # Bush upper right
+my $TILE1_BUSH_FUL        = 0x92;    # Bush front (of another bush) upper left
+my $TILE1_BUSH_FUR        = 0x93;    # Bush front (of another bush) upper right
+my $TILE1_BUSH_BL        = 0x94;    # Bush bottom/middle left
+my $TILE1_BUSH_BR        = 0x95;    # Bush bottom/middle right
+my $TILE1_BUSH_FBL        = 0x96;    # Bush front (of another bush) bottom left
+my $TILE1_BUSH_FBR        = 0x97;    # Bush front (of another bush) bottom right
+my $TILE1_BUSH_MID        = 0x98;    # Bush middle
+my $TILE1_BUSH_SUL        = 0x99;    # Bush shadowed upper left
+my $TILE1_BUSH_SUR        = 0x9A;    # Bush shadowed upper right
+my $TILE1_BUSH_SFUL        = 0x9B;    # Bush shadowed front (of another bush) upper left
+my $TILE1_BUSH_SFUR        = 0x9C;    # Bush shadowed front (of another bush) upper right
+my $TILE1_BUSH_SHUR        = 0x9D;    # Bush with shadow of big block
+my $TILE1_BUSH_SBL        = 0x9E;    # Bush shadowed bottom/middle left
+my $TILE1_BUSH_SBR        = 0x9F;    # Bush shadowed bottom/middle right
+
+my $TILE1_GBLOCKTH        = 0xA0;    # Green big block top horizontal runner
+my $TILE1_GBLOCKUL        = 0xA1;    # Green big block upper-left
+my $TILE1_GBLOCKUR        = 0xA2;    # Green big block upper-right
+
+my $TILE1_PIPETB1_L        = 0xAD;    # Pipe top/bottom 1 left (alt level)
+my $TILE1_PIPETB1_R        = 0xAE;    # Pipe top/bottom 1 right
+my $TILE1_PIPETB2_L        = 0xAF;    # Pipe top/bottom 2 left (Big [?] area)
+my $TILE1_PIPETB2_R        = 0xB0;    # Pipe top/bottom 2 right
+my $TILE1_PIPETB3_L        = 0xB1;    # Pipe top/bottom 3 left (not enterable)
+my $TILE1_PIPETB3_R        = 0xB2;    # Pipe top/bottom 3 right
+my $TILE1_PIPETB4_L        = 0xB3;    # Pipe top/bottom 4 left (within level transit)
+my $TILE1_PIPETB4_R        = 0xB4;    # Pipe top/bottom 4 right
+my $TILE1_PIPEH1_B        = 0xB5;    # Pipe horizontal 1 bottom (alt level)
+my $TILE1_PIPEH2_B        = 0xB6;    # Pipe horizontal 2 bottom (not enterable)
+my $TILE1_PIPEH_T        = 0xB7;    # Pipe horizontal top (common)
+my $TILE1_PIPEHT        = 0xB8;    # Pipe horizontal middle top
+my $TILE1_PIPEHB        = 0xB9;    # Pipe horizontal middle bottom
+my $TILE1_PIPEVL        = 0xBA;    # Pipe middle vertical left
+my $TILE1_PIPEVR        = 0xBB;    # Pipe middle vertical right
+
+my $TILE1_BLOCK_SHUR    = 0xC0;    # Big block shadow upper-right
+my $TILE1_BLOCK_SHUL    = 0xC1;    # Big block shadow upper-left (actually none, also used as a cleared P-Switch on level reload, AKA TILEA_PSWITCH_BLANK)
+my $TILE1_BLOCK_SHLL    = 0xC2;    # Big block shadow lower-left
+my $TILE1_BLOCK_SHLR    = 0xC3;    # Big block shadow lower-right
+my $TILE1_BLOCK_SHADOW    = 0xC4;    # Big block general side-shadow
+my $TILE1_BLOCK_SHADOWB    = 0xC5;    # Big block general bottom shadow
+my $TILE1_BBLOCKLV        = 0xC7;    # Blue big block left vertical runner
+my $TILE1_BBLOCKRV        = 0xC8;    # Blue big block right vertical runner
+my $TILE1_BBLOCKM        = 0xC9;    # Blue big block center
+my $TILE1_BBLOCKBH        = 0xCA;    # Blue big block bottom horizontal runner
+my $TILE1_BBLOCK_SHUR    = 0xCB;    # Blue big block shadowed on by another
+my $TILE1_BBLOCKSM        = 0xCC;    # Blue big block shadow middle
+my $TILE1_BBLOCKLL        = 0xCD;    # Blue big block lower-left
+my $TILE1_BBLOCKLR        = 0xCE;    # Blue big block lower-right
+my $TILE1_BBLOCKSB        = 0xCF;    # Blue big block shadow bottom
+
+my $TILE1_WATERBUMPS1    = 0xD8;    # Water ... not sure how to describe it
+my $TILE1_WATERBUMPS2    = 0xD9;    # Water ... not sure how to describe it
+my $TILE1_WATERBUMPSSH    = 0xD9;    # Water ... not sure how to describe it, shaded
+my $TILE1_WATERWAVEL    = 0xDB;    # Water waving to the left
+my $TILE1_WATERWAVE        = 0xDC;    # Water waving but with no apparent current
+my $TILE1_WATERWAVER    = 0xDD;    # Water waving to the right
+
+my $TILE1_WATER        = 0xDE;    # Water
+
+my $TILE1_WFALLTOP        = 0xE0;    # Top of waterfall
+my $TILE1_WFALLMID        = 0xE1;    # Middle of water, extending downward
+
+my $TILE1_BBLOCKUL        = 0xE3;    # Blue big block upper-left
+my $TILE1_BBLOCKTH        = 0xE2;    # Blue big block top horizontal runner
+my $TILE1_BBLOCKUR        = 0xE4;    # Blue big block upper-right
+
+my $TILE1_DIAMOND        = 0xF0;    # Diamond block
+my $TILE1_CCBRIDGE        = 0xF1;    # Cheep-cheep 'oo' bridge
+my $TILE1_WGROUNDTM        = 0xF4;    # Underwater ground top middle
+my $TILE1_WGROUNDMM        = 0xF5;    # Underwater ground middle-middle
+my $TILE1_WGROUNDTL        = 0xF6;    # Underwater ground top left
+my $TILE1_WGROUNDML        = 0xF7;    # Underwater ground middle-left
+my $TILE1_WGROUNDTR        = 0xF8;    # Underwater ground top right
+my $TILE1_WGROUNDMR        = 0xF9;    # Underwater ground middle-right
+
+#
+#
+#
+
+my @src = do {
+    open my $fh, '<', __FILE__ or die;
+    readline $fh;
+};
 
 sub xgoto (*) {
     my $label = shift;
-    warn "goto ``$label'' called at " . (caller)[2];
+    warn "goto ``$label'' called at " . (caller)[2] . ': ' . $src[ (caller)[2]-1 ];
     goto $label;
 }
 
@@ -429,7 +674,19 @@ $app->add_event_handler(
     }
 );
 
-
+sub decode_pad {
+    my $bits = shift;
+    my $out = '';
+    $out .= 'A' if $bits & $PAD_A;
+    $out .= 'B' if $bits & $PAD_B;
+    $out .= '[select]' if $bits & $PAD_SELECT;
+    $out .= '[start]' if $bits & $PAD_START;
+    $out .= 'U' if $bits & $PAD_UP;
+    $out .= 'D' if $bits & $PAD_DOWN;
+    $out .= 'L' if $bits & $PAD_LEFT;
+    $out .= 'R' if $bits & $PAD_RIGHT;
+    return $out;
+}
 
 $app->add_show_handler(
     sub {
@@ -440,6 +697,7 @@ $app->add_show_handler(
 
         # from Player_DoGameplay 
         # Makes for "wobbly" raising of the airship at least..
+
         $Counter_Wiggly = ( $Counter_Wiggly & 0xf0 ) - 0x90;  $Counter_Wiggly += 256 if $Counter_Wiggly < 0;  # hacked up
         $Counter_1++; $Counter_1 = 0 if $Counter_1 == 256; # happens in PRG031_F567; hacked up
 
@@ -467,7 +725,7 @@ $app->add_show_handler(
 
 warn "Player_InAir $Player_InAir Player_MoveLR $Player_MoveLR Player_XVel $Player_XVel Player_YVel $Player_YVel " .
      " Player_HitCeiling $Player_HitCeiling Player_LowClearance $Player_LowClearance\n";
-warn "Pad_Input $Pad_Input Pad_Holding $Pad_Holding\n";
+warn "Pad_Input << $Pad_Input @{[ decode_pad($Pad_Input) ]} >> Pad_Holding << $Pad_Holding @{[ decode_pad($Pad_Holding) ]} >>\n";
 
 
         #
@@ -509,10 +767,6 @@ $Devel::Trace::TRACE = 1;
 
             $sprite->sequence('jumpr')   if ( $sprite->sequence() =~ 'r'); # XXX
             $sprite->sequence('jumpl')   if ( $sprite->sequence() =~ 'l'); # XXX
-
-            # $state->v_y($vel_y);
-            # $gravity_delay = $gravity_delay_constant;
-            # $lockjump = 1;
 
         }
 
@@ -609,7 +863,7 @@ $Devel::Trace::TRACE = 1;
 
         # warn "Player_X shifted: @{[ $Player_X >> 4 ]} Player_Y shifted: @{[ $Player_Y >> 4 ]}";
         $sprite->x( $Player_X >> 4 );
-        $sprite->y( $Player_Y >> 4 );
+        $sprite->y( ( $Player_Y >> 4 ) + 16 );
         $sprite->draw($app->surface);
 
         for my $x ( 0 .. $map_max_x ) {
@@ -752,8 +1006,10 @@ sub Player_Control {
         $Temp_Var10 = $y;              # Temp_Var10 (Y offset) = 20 or 10
         $a = 0x08;
         $Temp_Var11 = $a;              # Temp_Var11 (X offset) = 8
-        Player_GetTileAndSlope();      # Get tile above Player XXXXXXXXXXXXX
-        $Level_Tile_Head = $a;         # -> Level_Tile_Head 
+        Player_GetTileAndSlope();      # Get tile above Player
+        $Level_Tile_Positions->[ 0 ] = [ ($Player_Y >> 4) + $Temp_Var10, ($Player_X >> 4) + $Temp_Var11  ]; # hacked up
+        $Level_Tile_Head = $a;         # -> Level_Tile_Head ; sdw: this variable seems to be the space the players head occupies and isn't used for much except for low-clearance detection; in normal play, it never is anything but space
+# warn ">>$a<< -- 'Get tile above Player' -- actually, tile where the players head is"; # XXX this never ever gets set to anything
         $Temp_Var1 = $a;               # -> Temp_Var1
         $Temp_Var2 = $Level_Tile_GndL; # Get left ground tilee -> Temp_Var2 # 
         $a = $Player_Behind_En = $Player_Behind;  # Default enable with being behind the scenes
@@ -767,8 +1023,7 @@ sub Player_Control {
         $y = 0;                        # Y = 0 (disable "behind the scenes")
         # If tile behind Player's head is $41 or TILE1_SKY, jump to PRG008_A77B
         $a = $Temp_Var1;
-        goto PRG008_A77B if $a == 0x41;           # XXX white tile?  what?
-        # goto PRG008_A77B if $a == $TILE1_SKY;   # XXX pull in constants for these?  or do something else?
+        goto PRG008_A77B if $a == $TILE1_SKY;
         $y++;                                     # Y = 1 (enable "behind the scenes")
         $a = $Player_Behind;
         goto PRG008_A77B if $a != 0;              # If Player is behind the scenes, jump to PRG008_A77B
@@ -795,8 +1050,8 @@ sub Player_Control {
         # sdw: $solidity_table->[ which kind of solidity we're checking ]->[ which page of tiles ] = number of first solid on that page
         # sdw: so this goto if less than is probably executing the goto if we haven't hit our head; the tile is numbered below the number of the
         # sdw: first solid tile
-        # goto PRG008_A7AD if $a < $Tile_AttrTable->[ $y + 4 ];  # CMP Tile_AttrTable+4,Y    ; Wall/ceiling-solid tile quadrant limits begin at Tile_AttrTable+4 # XXX Tile_AttrTable is a bunch of allocated space that data gets copied in to at the start of the level; XXX do this differnetly, for now; If tile index is less than value in Tile_AttrTable (not solid for wall/ceiling), jump to PRG008_A7AD # XXXXXXXXXXXX
-warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom};
+        # goto PRG008_A7AD if $a < $Tile_AttrTable->[ $y + 4 ];  # CMP Tile_AttrTable+4,Y    ; Wall/ceiling-solid tile quadrant limits begin at Tile_AttrTable+4 # XXX Tile_AttrTable is a bunch of allocated space that data gets copied in to at the start of the level; doing this differnetly, for now; If tile index is less than value in Tile_AttrTable (not solid for wall/ceiling), jump to PRG008_A7AD
+# warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom};
         goto PRG008_A7AD if ! $tile_properties{ $a }->{solid_bottom}; # $y = 0 for feet; sdw, goto if we haven't hit our head; continue on if we have hit our head
         
         $a = $Player_InAir | $Player_InWater; # | $Level_PipeMove; XXX
@@ -1079,7 +1334,7 @@ warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom
       $a = 0x08;
       $Temp_Var11 = $a;     # Temp_Var11 = 8 (X Offset for Player_GetTileAndSlope)
 
-      Player_GetTileAndSlope();    # Get tile
+      Player_GetTileAndSlope();    # Get tile; sdw: this is the block directly behind the player's body or, if he's large, behind his torso/head; it doesn't correspond to any of the Level_Tile_Array positions
 
       # goto PRG008_A8CA if $a != #TILE1_VINE; # XXX constant  # If tile is NOT another vine, jump to PRG008_A8CA
       goto PRG008_A8CA; # sdw XXX okay, let's just say that the tile isn't another vine; XXX jump-fly-flutter detects InAir
@@ -1182,7 +1437,7 @@ warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom
       # goto PRG008_A93D if( $a > ($app->h/4)*3 ); # BMI PRG008_A93D     # If Player is beneath the half point of the lower screen, jump to PRG008_A93D; sdw XXX hacked up a bit; also, what is the "half point of the lower screen"? XXXX disabling this for testing for a bit
 
       $a = $Player_YVel;
-      xgoto PRG008_A940 if $a < 0;     # If Player is moving upward, jump to PRG008_A940
+      goto PRG008_A940 if $a < 0;     # If Player is moving upward, jump to PRG008_A940
 
     PRG008_A93D:
       Player_ApplyYVelocity();     # Apply Player's Y velocity
@@ -1285,6 +1540,8 @@ sub GndMov_Small {
 
 sub Player_GroundHControl {
 
+    my $moving_left = 0; # XXX hackish
+
     $a = $Player_UphillFlag;
     goto PRG008_AB56 if $a == 0; # If Player is not going up hill, jump to PRG008_AB56
 
@@ -1356,9 +1613,8 @@ sub Player_GroundHControl {
     $y = $a;         # Y = Player_Suit << 3
   
   PRG008_AB9E:
-    # BIT <Pad_Holding
-    # BVC PRG008_ABA6     # If Player is NOT pressing 'B', jump to PRG008_ABA6
-    goto PRG008_ABA6 if ! ( $Pad_Holding & $PAD_B);    # If Player is NOT pressing LEFT, jump to PRG008_ABA6 
+    goto PRG008_ABA6 if ! ( $Pad_Holding & $PAD_B);     # BIT <Pad_Holding, BVC PRG008_ABA6 ... If Player is NOT pressing 'B', jump to PRG008_ABA6
+    # If Player is NOT pressing LEFT, jump to PRG008_ABA6 
 
     # Otherwise...
     $y += 4; # Y += 4 (offset 4 inside Player_XAccel* tables)
@@ -1375,7 +1631,6 @@ sub Player_GroundHControl {
 
     $a = $Player_XVel;
     goto PRG008_AC01 if $a == 0;    # If Player is not moving horizontally, jump to PRG008_AC01 (RTS)
-    my $moving_left = 0; # XXX hackish
     goto PRG008_ABD3 if $a < 0;     # If Player is moving leftward, jump to PRG008_ABD3
     goto PRG008_ABEB if $a > 0;     # If Player is moving rightward, jump to PRG008_ABEB
 
@@ -1417,6 +1672,20 @@ sub Player_GroundHControl {
 
     # Player moving leftward
 
+    # LDA #$00
+    # SUB Player_XAccelPseudoFrac,Y ; Negate value from Player_XAccelPseudoFrac[Y]
+    # STA <Temp_Var1    ; -> Temp_Var1
+   
+    # LDA Player_XAccelMain,Y ; Get Player_XAccelMain[Y]
+    # EOR #$ff     ; Negate it (sort of)
+    # STA <Temp_Var2   ; -> Temp_Var2
+   
+    # LDA <Temp_Var1
+    # BNE PRG008_ABF5  ; If Temp_Var1 <> 0, jump to PRG008_ABF5
+   
+    # INC <Temp_Var2   ; Otherwise, Temp_Var2++
+    # JMP PRG008_ABF5  ; Jump to PRG008_ABF5
+
     #$a = $Player_XAccelPseudoFrac->[ $y ];  # Negate value from Player_XAccelPseudoFrac[Y]
     ## $a = - $a XXX
     #$Temp_Var1 = $a;      # -> Temp_Var1
@@ -1429,7 +1698,7 @@ sub Player_GroundHControl {
     ## goto PRG008_ABF5 if $a != 0;      # If Temp_Var1 <> 0, jump to PRG008_ABF5
 
     ## $Temp_Var2++;     # Otherwise, Temp_Var2++; sdw: this finishes the negation; xor 0xffffffff goes from 10 to -11, for example; this puts it back to -10; sdw XXX why it only does this if Player_XAccelPseudoFrac comes back non-zero is a mystery to me; maybe it has to do with increased chance of carry with negative numbers
-    #goto PRG008_ABF5;
+    # goto PRG008_ABF5;
 
   PRG008_ABEB:
 
@@ -1480,7 +1749,7 @@ sub Level_CheckIfTileUnderwater {
     my $tile = $x ? $Temp_Var1 : $Temp_Var2;
     $a = 0;  # not underwater XXX
     $carry = 0;
-warn "tile ``$a'' solid_top: " . $tile_properties{ $a }->{solid_top};
+# warn "tile ``$a'' solid_top: " . $tile_properties{ $a }->{solid_top};
     $carry = 1 if $tile_properties{ $tile }->{solid_top};
 }
 
@@ -1752,17 +2021,17 @@ sub Player_ApplyVelocity {
 #;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 sub Player_GetTileAndSlope {
-     my $y = ($Player_Y >> 4) + $Temp_Var10;
-     my $x = ($Player_X >> 4) + $Temp_Var11;
-     $x >>= 4; # again; go from pixels to tiles, and tiles at 16 pixels wide
-     $y >>= 4; # ditto
+    my $y = ($Player_Y >> 4) + $Temp_Var10;
+    my $x = ($Player_X >> 4) + $Temp_Var11;
+    $x >>= 4; # again; go from pixels to tiles, and tiles at 16 pixels wide
+    $y >>= 4; # ditto
     # X/Y were not modified, so as inputs:
     # X = 0 (going down) or 1 (going up)
     # Y = Player_YVel
     #     JSR Player_GetTileAndSlope_Normal    ; Set Level_Tile and Player_Slopes; ... this sets Level_Tile and A
     # JSR Player_GetTileV  ; Get tile, set Level_Tile
-     $a = $map->[$x]->[$y]; # XXX okay, where do we stick this?  A, it looks like, and $Level_Tile too, but so far, it's only a temp nothing uses
-warn "Player_GetTileAndSlope for $x, $y = ``$a''";
+    $a = $map->[$x]->[$y]; # XXX okay, where do we stick this?  A, it looks like, and $Level_Tile too, but so far, it's only a temp nothing uses
+warn "-->$a<-- Player_GetTileAndSlope for delta $Temp_Var11, $Temp_Var10";
 }
 
 
@@ -1861,6 +2130,8 @@ sub Player_DetectSolids {
     Player_GetTileAndSlope();     # Get tile
     ${ $Level_Tile_Array->[ $x + 1 ] } = $a;    # STA Level_Tile_GndL,X     # Store i; sdw Level_Tile_GndL is at offset 1 in the array, so +1
 
+    $Level_Tile_Positions->[ $x + 1 ] = [ ($Player_Y >> 4) + $Temp_Var10, ($Player_X >> 4) + $Temp_Var11  ]; # hacked up
+
     push @stack, $a;  # PHA         # Save tile
 
     # AND #%11000000     # Get quadrant XXX sdw todo
@@ -1871,7 +2142,7 @@ sub Player_DetectSolids {
 
     $a = pop @stack; # PLA         # Restore tile
 
-    # JSR Level_DoCommonSpecialTiles     # Handle tile apporiately XXX
+    Level_DoCommonSpecialTiles();     # Handle tile apporiately
 
     $a = pop @stack; # PLA         
     $y = $a;  # TAY         # Restore 'Y' index
@@ -1887,7 +2158,7 @@ sub Player_DetectSolids {
     $y = 2;     # Y = 2 (checking "in front" tiles, lower and upper)
 
     Level_CheckGndLR_TileGTAttr();
-    goto PRG008_B53B if ! $carry;     # If not touching a solid tile, jump to PRG008_B53B
+    goto PRG008_B53B if ! $carry;     # If not touching a solid tile, jump to PRG008_B53B; sdw, this counts as the ceiling collision
 
     $a = $Player_LowClearance;
     goto PRG008_B53B if $a != 0;      # If Player_LowClearance is set, jump to PRG008_B53B
@@ -1945,10 +2216,10 @@ sub Player_DetectSolids {
     $a = $Player_InAir;
     goto PRG008_B55B if $a == 0;    # If Player is NOT mid air, jump to PRG008_B55B; sdw, that is, if he isn't marked as mid-air, but we're going to check again
 
-    $y = 0;     # Y = 0; sdw, this means checking the two tiles under the player; but then we set $Player_HitCeiling if it hits!?
+    $y = 0;     # Y = 0
 
     Level_CheckGndLR_TileGTAttr();
-    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A
+    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A; sdw: not touching a solid tile with our feet
 
     $y++;         # Y = 1
     $Player_HitCeiling = $y;    # Flag Player as having just hit head off ceiling
@@ -1963,6 +2234,7 @@ sub Player_DetectSolids {
   # PRG008_B558:
     # STA <Player_YVel # Update Player_YVel
     $Player_YVel = 1;
+die;
 
   PRG008_B55A:
     return;
@@ -1973,14 +2245,14 @@ sub Player_DetectSolids {
     $a = $Level_Tile_GndR;     # Get right tile
     # CMP Tile_AttrTable,X    
     # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
-warn "tile ``$a'' below right is solid: " . $tile_properties{ $a }->{solid_top}; # XXXXXXX this is coming up with the wrong tile
+# warn "tile ``$a'' below right is solid: " . $tile_properties{ $a }->{solid_top}; # XXXXXXX this is coming up with the wrong tile
     goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
 
     # LDX Level_Tile_Quad     # Get left tile quadrant
     $a = $Level_Tile_GndL;     # Get left tile
     # CMP Tile_AttrTable,X    
     # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
-warn "tile ``$a'' below left is solid: " . $tile_properties{ $a }->{solid_top};
+# warn "tile ``$a'' below left is solid: " . $tile_properties{ $a }->{solid_top};
     goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
 
     $a = $Player_InAir;
@@ -1988,7 +2260,7 @@ warn "tile ``$a'' below left is solid: " . $tile_properties{ $a }->{solid_top};
 
     # Otherwise...
 
-warn "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx halted player vertically XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+# warn "halted player vertically";
     $Player_YVel = $a; # Halt Player vertically
 
     $a = 1; 
@@ -2071,9 +2343,9 @@ sub Level_CheckGndLR_TileGTAttr {
     $carry = 0;
     $carry = 1 if $y == 0 and ( $tile_properties{ $tile1 }->{solid_top} or $tile_properties{ $tile2 }->{solid_top} ); # $y = 0 for feet
     $carry = 1 if $y == 2 and ( $tile_properties{ $tile1 }->{solid_bottom} or $tile_properties{ $tile2 }->{solid_bottom} ); # $y = 2 for front; solid bottom and solid sides are the same thing
-warn "tile ``$tile1'' with y=$y is solid top: " . $tile_properties{ $tile1 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile1 }->{solid_bottom};
-warn "tile ``$tile2'' with y=$y is solid top: " . $tile_properties{ $tile2 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile2 }->{solid_bottom};
-warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing " . ( $y == 0 ? "feet" : "front" );
+# warn "tile ``$tile1'' with y=$y is solid top: " . $tile_properties{ $tile1 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile1 }->{solid_bottom};
+# warn "tile ``$tile2'' with y=$y is solid top: " . $tile_properties{ $tile2 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile2 }->{solid_bottom};
+warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing ($y=) " . ( $y == 0 ? "feet" : "front" );
     #  XXX the head collision check is made elsewhere
 
   PRG008_B5D0:
@@ -2212,10 +2484,167 @@ sub Read_Joypad {
 
 };
 
+#
+# Level_DoCommonSpecialTiles
+#
+
+# Handle all common special tiles (ice blocks, P-Switches, bump blocks, etc.)
+# Does not include things like instant-kill lava tiles...
+# sdw: A contains the tile number of the block we're currently looking at
+# sdw: X is the index into our $Level_Tile_Array thing; it tells us where the block is that we're currently looking at
+# sdw: the routine calls this one, Player_DetectSolids, loops over $Level_Tile_GndL, $Level_Tile_GndR, $Level_Tile_InFL, $Level_Tile_InFU
+# XXX todo
+
+sub Level_DoCommonSpecialTiles {
+
+    $a = $y;                     # TYA         # A = Y (offset into TileAttrAndQuad_OffsSloped)
+    push @stack, $a;             # PHA         # Save it
+
+    $y = $Player_Kuribo;         # LDY Player_Kuribo
+    goto PRG008_B604 if $y != 0; # BNE PRG008_B604     # If Player is in Kuribo's shoe, jump to PRG008_B604
+
+    # LDA #TILEA_ICEBLOCK # XXX
+    # CMP Level_Tile_GndL,X
+    goto PRG008_B604; # XXX # BNE PRG008_B604     # If Player is not touching an ice block, jump to PRG008_B604
+ 
+    # # Player is touching an ice block...
+    # BIT <Pad_Input
+    # BVC PRG008_B604     # If Player is not pushing 'B', jump to PRG008_B604
+
+    # CPX #$03
+    # BEQ PRG008_B604     # If tile at head, jump to PRG008_B604
+
+    # LDA Level_ChgTileEvent
+    # BNE PRG008_B604     # If Level_ChgTileEvent <> 0 (tile change already queued), jump to PRG008_B604
+
+    # TXA
+    # PHA         # Save 'X' (current tile index) 
+
+    # JSR Level_IceBlock_GrabNew # Grab a new ice block object!  (If there's room)
+
+    # # Of note, if there was no room for an Ice Block, X = $FF (-1) right now
+    # TXA         # Transfer new object index 'X' -> 'A'
+    # ASL A         # Shift left 1 (setting carry if there was no room for Ice Block)
+
+    # PLA         # Restore current tile index -> 'A'
+    # TAX         # X = A
+
+    # BCS PRG008_B604     # If we didn't have room for an ice block, jump to PRG008_B604
+
+    # # Otherwise...
+
+    # LDA #$00
+    # STA Player_TailAttack     # Disable any tail attacking
+
+    # LDA #CHNGTILE_DELETETOBG
+    # JSR Level_QueueChangeBlock     # Queue a block change to erase to background!
+
+    # JMP PRG008_B652     # Jump to PRG008_B652
+
+  PRG008_B604:
+
+    # Not an ice block or if it was, Player was not interested in it...
+
+    $a = ${ $Level_Tile_Array->[ $x+1 ] };   # LDA Level_Tile_GndL,X
+warn ">>$a<<  " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
+    # CMP #TILEA_COIN # XXX
+    goto PRG008_B623; # XXX # BNE PRG008_B623     # If Player is not touching coin, jump to PRG008_B623
+
+    # LDA #CHNGTILE_DELETECOIN
+    # JSR Level_QueueChangeBlock     # Queue a block change to erase to background!
+    # JSR Level_RecordBlockHit     # Record having grabbed this coin so it does not come back
+
+    # # Play coin collected sound!
+    # LDA Sound_QLevel1
+    # ORA #SND_LEVELCOIN
+    # STA Sound_QLevel1
+
+    # LDA #$00
+    # STA Level_Tile_GndR    # Clear this tile detect (probably to prevent "double collecting" a coin the Player is straddling)
+
+    # JMP PRG008_B652     # Jump to PRG008_B652
+
+  PRG008_B623:
+
+    # Player not touching coin...
+
+    # XXX # CMP #TILEA_PSWITCH
+    goto PRG008_B64F; # XXX BNE PRG008_B64F     # If Player is not touching P-Switch, jump to PRG008_B64F
+
+    # Player touching P-Switch...
+
+    # CPX #$02
+    # BGS PRG008_B64F     # If it is being detected by Player's head, then jump to PRG008_B64F (don't hit with head!)
+
+    # LDA #CHNGTILE_PSWITCHSTOMP    # P-Switch hit tile change
+
+    # CMP Level_ChgTileEvent
+    # BEQ PRG008_B64F     # If we've already got a tile change in the queue, jump to PRG008_B64F
+
+    # # Queue tile change 9!
+    # JSR Level_QueueChangeBlock
+
+    # LDA #$10
+    # STA Level_Vibration    # Level_Vibration = $10 (little shake effect)
+
+    # # Wham! sound effect
+    # LDA Sound_QLevel1
+    # ORA #SND_LEVELBABOOM
+    # STA Sound_QLevel1
+
+    # LDA #$80     
+    # STA Level_PSwitchCnt     # Level_PSwitchCnt = $80 (duration of switch)
+
+    # # Play P-Switch song
+    # LDA #MUS2B_PSWITCH
+    # STA Sound_QMusic2
+
+    goto PRG008_B652;          # JMP PRG008_B652     # Jump to PRG008_B652
+
+  PRG008_B64F:
+    Level_DoBumpBlocks();     # Handle any bumpable blocks (e.g. ? blocks, note blocks, etc.)
+
+PRG008_B652:
+    $a = pop @stack;          # PLA         
+    $y = $a;                  # TAY         # Restore offset into TileAttrAndQuad_OffsSloped -> 'Y'
+
+    return;                   # RTS         # Return
+}
+
+#
+#
+#
+
+my $Level_ActionTiles = [
+    # Tiles activated anytime
+    $TILEA_GNOTE, $TILEA_HNOTE, $TILEA_NOTE, $TILEA_WOODBLOCKBOUNCE,
+   
+    # Tiles activated only when Player is moving upward
+    $TILEA_QBLOCKFLOWER, $TILEA_INVISCOIN, $TILEA_NOTEINVIS,
+];
+
+
+# Logic to handle "bump blocks", e.g. ? blocks, note blocks, etc.
+# sdw: A contains the tile number of the block we're currently looking at -- maybe
+# sdw: X is the index into our $Level_Tile_Array thing; it tells us where the block is that we're currently looking at
+# sdw: Level_Tile_InFL Level_Tile_InFU really are the blocks in front of us; this routine will never detect something we hit with our head... XXX but wait, how does "Checks for solid tile at Player's head" in Player_Control manage it?  oh, right, it feeds custom set of offsets to Player_GetTileAndSlope that represent the space where the players head is
+
+sub Level_DoBumpBlocks {
+
+    # LDA <Player_YVel # XXX some blocks don't bump if we're moving downards
+    # BPL PRG008_B6EF  ; If Player is moving downward, jump to PRG008_B6EF
+
+    $a = ${ $Level_Tile_Array->[ $x + 1 ] };
+    # warn ">>$a<<  " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
+    # $tile_properties{ $a }->{hittable} ...
+    if( $a eq 'X' and $Player_Y > 0 ) {
+        (my $x, my $y ) = @{ $Level_Tile_Positions->[ $x + 1 ] };
+        $map->[$x]->[$y] = ' '; 
+    }
+}
+
 
 __END__
-
-Player_Control->Player_GroundHControl
 
 XXX to convert:
 
