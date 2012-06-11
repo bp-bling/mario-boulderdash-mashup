@@ -5,8 +5,12 @@ use warnings;
 
 TODO:
 
-o. we're hoovering about five pixels above the ground
-o. need to use small mario graphic
+o. XXX whereever mario is on the board, set the tiles to indicate (but don't draw anything for those) for easier collision detection?
+o. FSA!
+o. BoulderDash stuff?
+o. mario/enemy collision logic
+o. mario stomping on stuff?
+o. barrels and ladders from the original Mario Brothers?  resurrect vine logic?
 o. Player_Draw
 o. Player_CommonGroundAnims
 o. Player_DoSpecialTiles
@@ -90,6 +94,7 @@ my $brick = SDL::Image::load( 'brick.gif' ) or die; # XXX combine with tile cons
 my $questionbox = SDL::Image::load( 'questionbox.gif' ) or die; # XXX combine with tile constants somehow
 my $emptybox = SDL::Image::load( 'emptybox.gif' ) or die; # XXX combine with tile constants somehow
 my $sand = SDL::Image::load( 'sand.gif' ) or die; # XXX combine with tile constants somehow
+my $rock = SDL::Image::load( 'rock.gif' ) or die; # XXX combine with tile constants somehow
 
 my $obj = SDLx::Controller::Interface->new( x => 10, y => 380, v_x => 0, v_y => 0 );
 
@@ -622,13 +627,15 @@ sub xgoto (*) {
 
 my %tile_properties = (
     # solid bottom and solid sides are the same thing
-    ' ' => { solid_top => 0, solid_bottom => 0, },
-    'X' => { solid_top => 1, solid_bottom => 1, },
-    '?' => { solid_top => 1, solid_bottom => 1, },
-    '.' => { solid_top => 1, solid_bottom => 1, },
-    '#' => { solid_top => 1, solid_bottom => 1, },
+    # XXX reconsile this with the TILE constants
+    ' ' => { solid_top => 0, solid_bottom => 0, rounded => 1, explodable => 0, consumable => 0, },
+    'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # brick
+    '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # questionbox
+    '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # emptybox
+    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # sand
+    '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, }, # boulder 
+    '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, }, # falling boulder
 );
-
 
 $obj->set_acceleration(sub { return ( 0, 0, 0); } ); # bitches if it doesn't have this
 
@@ -714,6 +721,8 @@ $app->add_show_handler(
         # controls and animation selection
         #
 
+        local_stuff(); #     XXXXXXXXXXX
+
         # from Player_DoGameplay 
         # Makes for "wobbly" raising of the airship at least..
 
@@ -755,15 +764,7 @@ warn "Pad_Input << $Pad_Input @{[ decode_pad($Pad_Input) ]} >> Pad_Holding << $P
 #use Devel::Trace;
 $Devel::Trace::TRACE = 1;
 
-      # was in Player_Control:
-      #  $Temp_Var3 = abs($Player_XVel); # hacked up XXX
-
-      #  $state->v_x($Player_XVel); # XXX hacked up
-      #  $Player_MoveLR = 1 if $Player_XVel < 0;
-      #  $Player_MoveLR = 2 if $Player_XVel > 0;
-
         if ( $pressed->{right} ) {
-            # $state->v_x($vel_x); # XXX Player_Control
             if   ( $pressed->{up} ) { $sprite->sequence('jumpr') }
             elsif ($sprite->sequence() ne 'right') { $sprite->sequence('right'); }
 
@@ -773,7 +774,6 @@ $Devel::Trace::TRACE = 1;
         }
 
         if ( $pressed->{left} ) {
-            # $state->v_x( -$vel_x ); # XXX Player_Control
             if   ( $pressed->{up} ) { $sprite->sequence('jumpl') }
             elsif ($sprite->sequence() ne 'left') { $sprite->sequence('left'); }
         }
@@ -853,27 +853,6 @@ $Devel::Trace::TRACE = 1;
         # re-center the screen
         #
 
-#        if ($scroller) {
-#            my $dir = 0;
-#            $scroller-- and $dir = +1 if $scroller > 0;
-#            $scroller++ and $dir = -1 if $scroller < 0;
-#
-#            $state->x( $state->x() + $dir );
-#
-#            $_->[0] += $dir foreach (@blocks); # XXXXXXXXXX move frame of reference instead
-#
-#        }
-#        else {
-#            if ( $state->x() > $app->w - 100 ) {
-#                $scroller = -5;
-#            }
-#            if ( $state->x() < 100 ) {
-#                $scroller = 5;
-#            }
-#
-#        }
-
-
         #
         # draw
         #
@@ -897,6 +876,8 @@ $Devel::Trace::TRACE = 1;
                     $icon = $questionbox if $tile eq '?';
                     $icon = $emptybox if $tile eq '.';
                     $icon = $sand if $tile eq '#';
+                    $icon = $rock if $tile eq '*';
+                    $icon = $rock if $tile eq '@';
                     SDL::Video::blit_surface(
                         $icon,     SDL::Rect->new(0, 0, 16, 16,),
                         $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
@@ -922,8 +903,6 @@ $Devel::Trace::TRACE = 1;
 #
 # render objects
 #
-
-$app->run();
 
 #sub check_collision {
 #    my ( $mario, $blocks ) = @_;
@@ -956,6 +935,93 @@ $app->run();
 #    return -1;
 #
 #}
+
+use constant { UP => 0, UPRIGHT => 1, RIGHT => 2, DOWNRIGHT => 3, DOWN => 4, DOWNLEFT => 5, LEFT => 6, UPLEFT => 7, };
+my $DIRX = [     0,          1,        1,            1,            0,          -1,          -1,        -1 ];
+my $DIRY = [    -1,         -1,        0,            1,            1,           1,           0,        -1 ];
+
+sub local_stuff {
+
+    #
+    # XXXXXXXXXXXXX
+    #
+
+    return unless 0 == ( $Counter_1 % 5 );
+
+    # my $get = sub { my ($p, $dir) = @_;       return $map->[ p.x + (DIRX[dir] || 0)]->[p.y + (DIRY[dir] || 0)].object; },
+    # my $set = sub { ($p, $o, $dir) = @_;  var cell = this.cells[p.x + (DIRX[dir] || 0)][p.y + (DIRY[dir] || 0)]; cell.object = o; cell.frame = this.frame; },
+    # my $clear = sub { my ($p, $dir) = @_;    this.set(p,OBJECT.SPACE,dir); },
+    # my $move = sub { my ($p, $dir, $o) = @_;  this.clear(p); this.set(p,o,dir); },
+
+    # local
+    my $xydir = sub { return ( $_[0] + $DIRX->[$_[2]], $_[1] + $DIRY->[$_[2]] ) };
+    my $xydirmap = sub :lvalue { my ($x, $y) = $xydir->(@_); $map->[$x]->[$y]; };
+
+    my $isempty = sub { $xydirmap->(@_) eq ' '; };
+    my $isdirt = sub { $xydirmap->(@_) eq '~'; };
+    my $isboulder = sub { $xydirmap->(@_) eq '*'; };
+    # my $isrockford = sub { my ($p, $dir) = @_; return this.get(p,dir) === OBJECT.ROCKFORD; }, # XXXXXXXX
+    my $isdiamond = sub { $xydirmap->(@_) eq 'v'; };
+
+    my $isexplodable = sub { $tile_properties{ $xydirmap->(@_) }->{explodable}; };
+    my $isconsumable = sub { $tile_properties{ $xydirmap->(@_) }->{consumable}; };  # consumable by an explosion
+    my $isrounded = sub { $tile_properties{ $xydirmap->(@_) }->{rounded}; };  # consumable by an explosion
+
+
+    # for(my $y = 0 ; $y < $map_max_y ; ++$y) 
+    for my $y ( reverse 0 .. $map_max_y-1 ) {
+        for(my $x = 0 ; $x < $map_max_x ; ++$x) {
+
+            my $tile = $map->[$x]->[$y];  defined $tile or die "$x $y";
+
+            # ' ' => { solid_top => 0, solid_bottom => 0, },
+            # 'X' => { solid_top => 1, solid_bottom => 1, },
+            # '?' => { solid_top => 1, solid_bottom => 1, },
+            # '.' => { solid_top => 1, solid_bottom => 1, },
+            # '#' => { solid_top => 1, solid_bottom => 1, },
+            # '*' => { solid_top => 1, solid_bottom => 1, },
+
+            if( $tile eq '*' ) {
+                if ($isempty->($x, $y, DOWN)) {
+                    $map->[$x]->[$y] = '@';
+                } elsif ( $isrounded->($x, $y, DOWN) and $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
+                    # this.move(p, DIR.LEFT, OBJECT.BOULDERFALLING);
+                    $map->[$x]->[$y] = ' ';
+                    $xydirmap->( $x, $y, LEFT ) = '@';
+                } elsif ( $isrounded->($x, $y, DOWN) and $isempty->($x, $y, RIGHT) && $isempty->($x, $y, DOWNRIGHT)) {
+                    # this.move(p, DIR.RIGHT, OBJECT.BOULDERFALLING);
+                    $map->[$x]->[$y] = ' ';
+                    $xydirmap->( $x, $y, RIGHT ) = '@';
+                }
+            }
+
+            if( $tile eq '@' ) {
+                if ($isempty->($x, $y, DOWN)) {
+                    $xydirmap->($x, $y, DOWN) = '@';
+                    $map->[$x]->[$y] = ' ';
+                # } elsif ($isexplodable->($x, $y, DOWN)) { # XXXXXXXXXX
+                #   $explode->($x, $y, DOWN);
+                # } elsif ($ismagic->($x, $y, DOWN))   {
+                #   $domagic->($x, $y, OBJECT.DIAMOND);   
+                } elsif ($isrounded->($x, $y, DOWN) && $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
+                    # $move->($x, $y, LEFT, OBJECT.BOULDERFALLING);
+                    $xydirmap->($x, $y, LEFT) = '@';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ($isrounded->($x, $y, DOWN) && $isempty->($x, $y, RIGHT) && $isempty->($x, $y, DOWNRIGHT)) {
+                    # $move->($x, $y, RIGHT, OBJECT.BOULDERFALLING);
+                    $xydirmap->($x, $y, RIGHT) = '@';
+                    $map->[$x]->[$y] = ' ';
+                } else {
+                    # $set->($x, $y, OBJECT.BOULDER);
+                    $map->[$x]->[$y] = '*';
+                }
+            }
+
+        }
+    }
+
+
+}
 
 sub Player_Control {
 
@@ -2681,6 +2747,7 @@ warn ">>$a<< Player_YVel = $Player_YVel Level_DoBumpBlocks " . (qw/Level_Tile_He
     }
 }
 
+$app->run();
 
 __END__
 
