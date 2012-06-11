@@ -1,23 +1,30 @@
-X               ###############                                                          X
-X               ###############                                                          X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X         ?                            XX                                                X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-XXX    XXXXXX    XXXXXXXXXXXXXX     XXXXXXXXXXXXXXXXXX   XXXXXXXXXXX     XXXXXXXXXXXXXXXXX
-X                                                                                        X
-X                                                                                        X
-X                                                                                        X
-XXXXXXXXXXXXX    XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX   XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-X                                                                                        X
-X                                                                                        X
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+X             D*#############*D        X
+X             D*#############*D        X
+X             D*#############*D        X
+X             D***************D        X
+X             DD*************DD        X
+X              DD           DD         X
+X               DD         DD          X
+X                DD       DD           X
+X                 DD     DD            X
+X                  DD   DD             X
+X                   DD DD              X
+X                    DDD               X
+X                     D                X
+X                     D                X
+X                     D                X
+X                     D                X
+X                     D                X
+X         ?           X           X    X
+X                                      X
+X                                      X
+X                                      X
+X                                      X
+XXX    XXXXXX    XXXXXXXXXXXX  XXXXXXXXX
+X                                      X
+X                                      X
+X                                      X
+XXXXXXXXXXXXX    XXXXXXXXXXXXXXXXXXXXXXX
+X                       X              X
+X                       X              X
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX

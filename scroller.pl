@@ -14,6 +14,8 @@ o. barrels and ladders from the original Mario Brothers?  resurrect vine logic?
 o. Player_Draw
 o. Player_CommonGroundAnims
 o. Player_DoSpecialTiles
+o. Player_DoGameplay -- stole a few tidbits from it but should copy the whole routine
+
 
 =cut
 
@@ -90,11 +92,30 @@ $sprite->set_sequences(
 $sprite->sequence('stopr');
 $sprite->start();
 
+# hacked up:
+
 my $brick = SDL::Image::load( 'brick.gif' ) or die; # XXX combine with tile constants somehow
 my $questionbox = SDL::Image::load( 'questionbox.gif' ) or die; # XXX combine with tile constants somehow
 my $emptybox = SDL::Image::load( 'emptybox.gif' ) or die; # XXX combine with tile constants somehow
 my $sand = SDL::Image::load( 'sand.gif' ) or die; # XXX combine with tile constants somehow
 my $rock = SDL::Image::load( 'rock.gif' ) or die; # XXX combine with tile constants somehow
+my $dirt = SDL::Image::load( 'dirt.gif' ) or die; # XXX combine with tile constants somehow
+
+my %tile_properties = (
+    # solid bottom and solid sides are the same thing
+    # XXX reconsile this with the TILE constants
+    ' ' => { solid_top => 0, solid_bottom => 0, rounded => 1, explodable => 0, consumable => 0, diggable => 0, },
+    'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # brick
+    '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # questionbox
+    '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # emptybox
+    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 1, }, # sand
+    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 1, }, # falling sand
+    '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, diggable => 0, }, # rock/boulder 
+    '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # rock/falling boulder
+    'D' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # dirt
+    'd' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # falling dirt
+);
+
 
 my $obj = SDLx::Controller::Interface->new( x => 10, y => 380, v_x => 0, v_y => 0 );
 
@@ -623,21 +644,6 @@ sub xgoto (*) {
     goto $label;
 }
 
-# hacked up:
-
-my %tile_properties = (
-    # solid bottom and solid sides are the same thing
-    # XXX reconsile this with the TILE constants
-    ' ' => { solid_top => 0, solid_bottom => 0, rounded => 1, explodable => 0, consumable => 0, },
-    'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # brick
-    '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # questionbox
-    '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # emptybox
-    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # sand
-    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # falling sand
-    '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, }, # boulder 
-    '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, }, # falling boulder
-);
-
 $obj->set_acceleration(sub { return ( 0, 0, 0); } ); # bitches if it doesn't have this
 
 #
@@ -724,8 +730,8 @@ $app->add_show_handler(
 
         Boulderdash();
 
-        # from Player_DoGameplay 
         # Makes for "wobbly" raising of the airship at least..
+        # from Player_DoGameplay:
 
         $Counter_Wiggly = ( $Counter_Wiggly & 0xf0 ) - 0x90;  $Counter_Wiggly += 256 if $Counter_Wiggly < 0;  # hacked up
         $Counter_1++; $Counter_1 = 0 if $Counter_1 == 256; # happens in PRG031_F567; hacked up
@@ -756,6 +762,8 @@ warn "Player_InAir $Player_InAir Player_MoveLR $Player_MoveLR Player_XVel $Playe
      " Player_HitCeiling $Player_HitCeiling Player_LowClearance $Player_LowClearance\n";
 warn "Pad_Input << $Pad_Input @{[ decode_pad($Pad_Input) ]} >> Pad_Holding << $Pad_Holding @{[ decode_pad($Pad_Holding) ]} >>\n";
 
+        # from Player_DoGameplay:
+        $Player_LowClearance = 0;
 
         #
         #
@@ -880,6 +888,8 @@ $Devel::Trace::TRACE = 1;
                     $icon = $sand if $tile eq '=';
                     $icon = $rock if $tile eq '*';
                     $icon = $rock if $tile eq '@';
+                    $icon = $dirt if $tile eq 'D';
+                    $icon = $dirt if $tile eq 'd';
                     SDL::Video::blit_surface(
                         $icon,     SDL::Rect->new(0, 0, 16, 16,),
                         $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
@@ -899,7 +909,6 @@ $Devel::Trace::TRACE = 1;
 
         $app->update();
     }
-
 );
 
 #
@@ -969,19 +978,48 @@ sub Boulderdash {
     my $isconsumable = sub { $tile_properties{ $xydirmap->(@_) }->{consumable}; };  # consumable by an explosion
     my $isrounded = sub { $tile_properties{ $xydirmap->(@_) }->{rounded}; };  # consumable by an explosion
 
+    my @dirt;
+    my $dirt_unit = sub {
+        my( $x, $y ) = @_;
+        return if grep { $_->[0] == $x and $_->[1] == $y } @dirt;  # use previous results
+        @dirt = ();
+        my $recurse;  $recurse = sub {
+            my( $x, $y, ) = @_;
+            return unless $map->[$x]->[$y] eq 'D' or $map->[$x]->[$y] eq 'd';
+            return if grep { $_->[0] == $x and $_->[1] == $y } @dirt;
+            push @dirt, [ $x, $y ];
+            $map->[$x]->[$y] = 'd'; # change it back if we aren't falling; just don't recurse back into ourself
+            $recurse->( $xydir->($x, $y, DOWN) );
+            $recurse->( $xydir->($x, $y, UP) );
+            $recurse->( $xydir->($x, $y, LEFT) );
+            $recurse->( $xydir->($x, $y, RIGHT) );
+        };
+        $recurse->( $x, $y );
+        my $supported = 0;  # until shown otherwise
+        for my $i ( 0 .. $map_max_x-1 ) {
+            my @dirt_this_column = grep $_->[0] == $x, @dirt;
+            (my $bottom_bit_of_dirt) = sort { $main::b->[1] <=> $main::a->[1] } @dirt_this_column;
+            $supported = 1 if ! $isempty->($bottom_bit_of_dirt->[0], $bottom_bit_of_dirt->[1], DOWN);
+        }
+        if( $supported ) {
+            for my $xy ( @dirt ) { 
+                $map->[ $xy->[0] ]->[ $xy->[1] ] = 'D';  
+            }
+        }
+    };
 
-    # for(my $y = 0 ; $y < $map_max_y ; ++$y) 
+    my $player_x = ( $Player_X >> 4 ) + 8;      $player_x >>= 4;  # first drop the fractal part, then convert from pixels to blocks
+    my $player_y = ( $Player_Y >> 4 ) + 16;     $player_y >>= 4;
+
+    if( $tile_properties{ $map->[ $player_x ]->[ $player_y ] }->{diggable} ) {
+        $map->[$player_x]->[$player_y] = ' '; # XXX improve
+    }
+
+    # for(my $y = 0 ; $y < $map_max_y ; ++$y) {  # XXX
     for my $y ( reverse 0 .. $map_max_y-1 ) {
         for(my $x = 0 ; $x < $map_max_x ; ++$x) {
 
             my $tile = $map->[$x]->[$y];  defined $tile or die "$x $y";
-
-            # ' ' => { solid_top => 0, solid_bottom => 0, },
-            # 'X' => { solid_top => 1, solid_bottom => 1, },
-            # '?' => { solid_top => 1, solid_bottom => 1, },
-            # '.' => { solid_top => 1, solid_bottom => 1, },
-            # '#' => { solid_top => 1, solid_bottom => 1, },
-            # '*' => { solid_top => 1, solid_bottom => 1, },
 
             # boulders
 
@@ -1024,7 +1062,6 @@ sub Boulderdash {
             # sand
 
             if( $tile eq '#' ) {
-                # warn '===================================================== ' . join ', ',  $xydir->($xydir->($x, $y, LEFT), LEFT);
                 if ($isempty->($x, $y, DOWN)) {
                     $map->[$x]->[$y] = '=';
                 } elsif ( $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
@@ -1038,14 +1075,20 @@ sub Boulderdash {
                     $isempty->( $xydir->($x, $y, LEFT), LEFT) && 
                     $isempty->( $xydir->($x, $y, LEFT), DOWNLEFT)
                 ) {
-                    $xydirmap->($xydir->($x, $y, LEFT), DOWNLEFT) = '=';
+                    $xydirmap->($x, $y, LEFT) = '=';
                     $map->[$x]->[$y] = ' ';
                 } elsif ( 
                     $isempty->($x, $y, RIGHT) && 
                     $isempty->( $xydir->($x, $y, RIGHT), RIGHT) && 
                     $isempty->( $xydir->($x, $y, RIGHT), DOWNRIGHT)
                 ) {
-                    $xydirmap->($xydir->($x, $y, RIGHT), DOWNRIGHT) = '=';
+                    $xydirmap->($x, $y, RIGHT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ( $isempty->($x, $y, LEFT) && $xydirmap->($x, $y, UP) eq '#' ) {
+                    $xydirmap->($x, $y, LEFT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ( $isempty->($x, $y, RIGHT) && $xydirmap->($x, $y, UP) eq '#' ) {
+                    $xydirmap->($x, $y, RIGHT) = '=';
                     $map->[$x]->[$y] = ' ';
                 }
             }
@@ -1065,6 +1108,29 @@ sub Boulderdash {
                 }
             }
 
+            # dirt 
+
+            if( $tile eq 'D' ) {
+                #if ( $isempty->($x, $y, DOWN) and $isempty->($x, $y, DOWNLEFT ) and $isempty->($x, $y, DOWNRIGHT ) ) {
+                    #$map->[$x]->[$y] = 'd';
+                # }
+$dirt_unit->($x, $y);
+            }
+
+            if( $tile eq 'd' ) {
+                if ($isempty->($x, $y, DOWN)) {
+                    $xydirmap->($x, $y, DOWN) = 'd';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ($isrounded->($x, $y, DOWN) && $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
+                    $xydirmap->($x, $y, LEFT) = 'd';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ($isrounded->($x, $y, DOWN) && $isempty->($x, $y, RIGHT) && $isempty->($x, $y, DOWNRIGHT)) {
+                    $xydirmap->($x, $y, RIGHT) = 'd';
+                    $map->[$x]->[$y] = ' ';
+                } else {
+                    $map->[$x]->[$y] = 'D';
+                }
+            }
 
         }
     }
@@ -1197,6 +1263,7 @@ sub Player_Control {
         # sdw: first solid tile
         # goto PRG008_A7AD if $a < $Tile_AttrTable->[ $y + 4 ];  # CMP Tile_AttrTable+4,Y    ; Wall/ceiling-solid tile quadrant limits begin at Tile_AttrTable+4 # XXX Tile_AttrTable is a bunch of allocated space that data gets copied in to at the start of the level; doing this differnetly, for now; If tile index is less than value in Tile_AttrTable (not solid for wall/ceiling), jump to PRG008_A7AD
 # warn "tile ``$a'' above head is solid: " . $tile_properties{ $a }->{solid_bottom};
+
         goto PRG008_A7AD if ! $tile_properties{ $a }->{solid_bottom}; # $y = 0 for feet; sdw, goto if we haven't hit our head; continue on if we have hit our head
         
         $a = $Player_InAir | $Player_InWater; # | $Level_PipeMove; XXX
@@ -1214,9 +1281,8 @@ sub Player_Control {
         $a &= ~ $PAD_A;
         $Pad_Input = $a;   # ?? it's still zero?
 
-        # Player_LowClearance = 1 (Player is in a "low clearance" situation!)
         $a = 0x01;
-        $Player_LowClearance = $a;
+        $Player_LowClearance = $a;         # Player_LowClearance = 1 (Player is in a "low clearance" situation!)
 
         # This makes the Player "slide" when he's in a space too narrow
         # $a += $Player_X; 
@@ -2364,7 +2430,7 @@ sub Player_DetectSolids {
     $y = 0;     # Y = 0
 
     Level_CheckGndLR_TileGTAttr();
-    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A; sdw: not touching a solid tile with our feet... yes, feet.  checked carefully.  odd as it is, if we're going upwards and our feet hit something, we've hit a block
+    goto PRG008_B55A if ! $carry;   # If not touching a solid tile, jump to PRG008_B55A; sdw: not touching a solid tile with our feet... except that when we're heading upwards, the slot for checking feet becomes above our head, so it's really misnamed
 
     $y++;         # Y = 1
     $Player_HitCeiling = $y;    # Flag Player as having just hit head off ceiling
@@ -2389,14 +2455,12 @@ sub Player_DetectSolids {
     $a = $Level_Tile_GndR;     # Get right tile
     # CMP Tile_AttrTable,X    
     # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
-# warn "tile ``$a'' below right is solid: " . $tile_properties{ $a }->{solid_top}; # XXXXXXX this is coming up with the wrong tile
     goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
 
     # LDX Level_Tile_Quad     # Get left tile quadrant
     $a = $Level_Tile_GndL;     # Get left tile
     # CMP Tile_AttrTable,X    
     # BGE PRG008_B57E          # If the tile is >= the attr value, jump to PRG008_B57E; sdw, branch if the tile is solid
-# warn "tile ``$a'' below left is solid: " . $tile_properties{ $a }->{solid_top};
     goto PRG008_B57E if $tile_properties{ $a }->{solid_top};
 
     $a = $Player_InAir;
@@ -2469,6 +2533,8 @@ sub Player_DetectSolids {
 # sdw: Y is index into $Level_Tile_Array (not relative to the beginning but starting at _GndL and _GndR) 
 # sdw: XXX since this uses the same offset into the Tile_AttrTable and into $Level_Tile, I think this means that head, feet, side of player each have different values that tile numbers are compared to; what I've read supports this
 # sdw: likely, Y is either 0 to check GndL and GndR, or is 2 to check InFL, InFU; yup, comments in the code back this up
+# sdw: solid_top is checked in two other places, including Level_CheckIfTileUnderwater; this routine is only called to check
+# sdw: if we've hit our head while going up, or if we're running into a wall while going forward
 
 sub Level_CheckGndLR_TileGTAttr {
 
@@ -2485,12 +2551,13 @@ sub Level_CheckGndLR_TileGTAttr {
     my $tile2 = ${ $Level_Tile_Array->[ $y + 1 ]; };      # as above
 
     $carry = 0;
-    $carry = 1 if $y == 0 and ( $tile_properties{ $tile1 }->{solid_top} or $tile_properties{ $tile2 }->{solid_top} ); # $y = 0 for feet
+    # $carry = 1 if $y == 0 and ( $tile_properties{ $tile1 }->{solid_top} or $tile_properties{ $tile2 }->{solid_top} ); # $y = 0 for feet (or head if we're moving upwards!) # XXX
+    $carry = 1 if $y == 0 and ( $tile_properties{ $tile1 }->{solid_bottom} or $tile_properties{ $tile2 }->{solid_bottom} ); # $y = 0 for feet (or head if we're moving upwards!)
     $carry = 1 if $y == 2 and ( $tile_properties{ $tile1 }->{solid_bottom} or $tile_properties{ $tile2 }->{solid_bottom} ); # $y = 2 for front; solid bottom and solid sides are the same thing
+
 # warn "tile ``$tile1'' with y=$y is solid top: " . $tile_properties{ $tile1 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile1 }->{solid_bottom};
 # warn "tile ``$tile2'' with y=$y is solid top: " . $tile_properties{ $tile2 }->{solid_top} . " an solid bottom: " . $tile_properties{ $tile2 }->{solid_bottom};
 # warn "Level_CheckGndLR_TileGTAttr carry = $carry when testing ($y=) " . ( $y == 0 ? "feet" : "front" );
-    #  XXX the head collision check is made elsewhere
 
   PRG008_B5D0:
 
@@ -2779,7 +2846,7 @@ sub Level_DoBumpBlocks {
     # BPL PRG008_B6EF  ; If Player is moving downward, jump to PRG008_B6EF
 
     $a = ${ $Level_Tile_Array->[ $x + 1 ] };
-warn ">>$a<< Player_YVel = $Player_YVel Level_DoBumpBlocks " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
+    # warn ">>$a<< Player_YVel = $Player_YVel Level_DoBumpBlocks " . (qw/Level_Tile_Head Level_Tile_GndL Level_Tile_GndR Level_Tile_InFL Level_Tile_InFU/)[ $x+1 ];
     # $tile_properties{ $a }->{hittable} ...
     if( $a eq 'X' and $Player_YVel < 0 and ( $x == 0 or $x == 1 ) ) {
         (my $x, my $y ) = @{ $Level_Tile_Positions->[ $x + 1 ] };
