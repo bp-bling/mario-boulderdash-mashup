@@ -27,7 +27,7 @@ use PeekPoke 'peek', 'poke';
 use B;
 use B::Generate;
 
-my $app = SDLx::App->new( w => 400, h => 400, dt => 0.02, title => 'Pario' );
+my $app = SDLx::App->new( w => 640, h => 480, dt => 0.02, title => 'Pario' );
 
 my $joystick;
 if( my $num_joysticks = SDL::Joystick::num_joysticks() ) {
@@ -89,6 +89,7 @@ $sprite->start();
 my $brick = SDL::Image::load( 'brick.gif' ) or die; # XXX combine with tile constants somehow
 my $questionbox = SDL::Image::load( 'questionbox.gif' ) or die; # XXX combine with tile constants somehow
 my $emptybox = SDL::Image::load( 'emptybox.gif' ) or die; # XXX combine with tile constants somehow
+my $sand = SDL::Image::load( 'sand.gif' ) or die; # XXX combine with tile constants somehow
 
 my $obj = SDLx::Controller::Interface->new( x => 10, y => 380, v_x => 0, v_y => 0 );
 
@@ -625,6 +626,7 @@ my %tile_properties = (
     'X' => { solid_top => 1, solid_bottom => 1, },
     '?' => { solid_top => 1, solid_bottom => 1, },
     '.' => { solid_top => 1, solid_bottom => 1, },
+    '#' => { solid_top => 1, solid_bottom => 1, },
 );
 
 
@@ -894,6 +896,7 @@ $Devel::Trace::TRACE = 1;
                     $icon = $brick if $tile eq 'X';
                     $icon = $questionbox if $tile eq '?';
                     $icon = $emptybox if $tile eq '.';
+                    $icon = $sand if $tile eq '#';
                     SDL::Video::blit_surface(
                         $icon,     SDL::Rect->new(0, 0, 16, 16,),
                         $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
