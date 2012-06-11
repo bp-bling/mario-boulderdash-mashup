@@ -633,6 +633,7 @@ my %tile_properties = (
     '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # questionbox
     '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # emptybox
     '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # sand
+    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, }, # falling sand
     '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, }, # boulder 
     '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, }, # falling boulder
 );
@@ -721,7 +722,7 @@ $app->add_show_handler(
         # controls and animation selection
         #
 
-        local_stuff(); #     XXXXXXXXXXX
+        Boulderdash();
 
         # from Player_DoGameplay 
         # Makes for "wobbly" raising of the airship at least..
@@ -876,6 +877,7 @@ $Devel::Trace::TRACE = 1;
                     $icon = $questionbox if $tile eq '?';
                     $icon = $emptybox if $tile eq '.';
                     $icon = $sand if $tile eq '#';
+                    $icon = $sand if $tile eq '=';
                     $icon = $rock if $tile eq '*';
                     $icon = $rock if $tile eq '@';
                     SDL::Video::blit_surface(
@@ -940,13 +942,13 @@ use constant { UP => 0, UPRIGHT => 1, RIGHT => 2, DOWNRIGHT => 3, DOWN => 4, DOW
 my $DIRX = [     0,          1,        1,            1,            0,          -1,          -1,        -1 ];
 my $DIRY = [    -1,         -1,        0,            1,            1,           1,           0,        -1 ];
 
-sub local_stuff {
+sub Boulderdash {
 
     #
     # XXXXXXXXXXXXX
     #
 
-    return unless 0 == ( $Counter_1 % 5 );
+    return unless 0 == ( $Counter_1 % 4 );
 
     # my $get = sub { my ($p, $dir) = @_;       return $map->[ p.x + (DIRX[dir] || 0)]->[p.y + (DIRY[dir] || 0)].object; },
     # my $set = sub { ($p, $o, $dir) = @_;  var cell = this.cells[p.x + (DIRX[dir] || 0)][p.y + (DIRY[dir] || 0)]; cell.object = o; cell.frame = this.frame; },
@@ -980,6 +982,8 @@ sub local_stuff {
             # '.' => { solid_top => 1, solid_bottom => 1, },
             # '#' => { solid_top => 1, solid_bottom => 1, },
             # '*' => { solid_top => 1, solid_bottom => 1, },
+
+            # boulders
 
             if( $tile eq '*' ) {
                 if ($isempty->($x, $y, DOWN)) {
@@ -1016,6 +1020,51 @@ sub local_stuff {
                     $map->[$x]->[$y] = '*';
                 }
             }
+
+            # sand
+
+            if( $tile eq '#' ) {
+                # warn '===================================================== ' . join ', ',  $xydir->($xydir->($x, $y, LEFT), LEFT);
+                if ($isempty->($x, $y, DOWN)) {
+                    $map->[$x]->[$y] = '=';
+                } elsif ( $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
+                    $map->[$x]->[$y] = ' ';
+                    $xydirmap->( $x, $y, DOWNLEFT ) = '=';
+                } elsif ( $isempty->($x, $y, RIGHT) && $isempty->($x, $y, DOWNRIGHT)) {
+                    $map->[$x]->[$y] = ' ';
+                    $xydirmap->( $x, $y, DOWNRIGHT ) = '=';
+                } elsif ( 
+                    $isempty->($x, $y, LEFT) && 
+                    $isempty->( $xydir->($x, $y, LEFT), LEFT) && 
+                    $isempty->( $xydir->($x, $y, LEFT), DOWNLEFT)
+                ) {
+                    $xydirmap->($xydir->($x, $y, LEFT), DOWNLEFT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ( 
+                    $isempty->($x, $y, RIGHT) && 
+                    $isempty->( $xydir->($x, $y, RIGHT), RIGHT) && 
+                    $isempty->( $xydir->($x, $y, RIGHT), DOWNRIGHT)
+                ) {
+                    $xydirmap->($xydir->($x, $y, RIGHT), DOWNRIGHT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                }
+            }
+
+            if( $tile eq '=' ) {
+                if ($isempty->($x, $y, DOWN)) {
+                    $xydirmap->($x, $y, DOWN) = '#';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ( $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
+                    $xydirmap->($x, $y, DOWNLEFT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ( $isempty->($x, $y, RIGHT) && $isempty->($x, $y, DOWNRIGHT)) {
+                    $xydirmap->($x, $y, DOWNRIGHT) = '=';
+                    $map->[$x]->[$y] = ' ';
+                } else {
+                    $map->[$x]->[$y] = '#';
+                }
+            }
+
 
         }
     }
