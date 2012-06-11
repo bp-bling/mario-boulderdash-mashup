@@ -16,6 +16,7 @@ o. Player_DoSpecialTiles
 use SDL;
 use SDL::Rect;
 use SDL::Events;
+use SDL::Image;
 use Math::Trig;
 use Data::Dumper;
 use SDLx::App;
@@ -85,7 +86,21 @@ $sprite->set_sequences(
 $sprite->sequence('stopr');
 $sprite->start();
 
+my $brick = SDL::Image::load( 'brick.gif' ) or die; # XXX combine with tile constants somehow
+my $questionbox = SDL::Image::load( 'questionbox.gif' ) or die; # XXX combine with tile constants somehow
+my $emptybox = SDL::Image::load( 'emptybox.gif' ) or die; # XXX combine with tile constants somehow
+
 my $obj = SDLx::Controller::Interface->new( x => 10, y => 380, v_x => 0, v_y => 0 );
+
+#
+#
+#
+
+my @enemes;
+
+#
+#
+#
 
 my $map;  # ->[$x]->[$y]
 my $map_max_x = 0;
@@ -608,6 +623,8 @@ my %tile_properties = (
     # solid bottom and solid sides are the same thing
     ' ' => { solid_top => 0, solid_bottom => 0, },
     'X' => { solid_top => 1, solid_bottom => 1, },
+    '?' => { solid_top => 1, solid_bottom => 1, },
+    '.' => { solid_top => 1, solid_bottom => 1, },
 );
 
 
@@ -870,8 +887,18 @@ $Devel::Trace::TRACE = 1;
             next if $x * $w > $app->w;
             for my $y ( 0 .. $map_max_y ) {
                 next if $y * $w > $app->h;
-                # $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if $map->[$x]->[$y] eq 'X'; # XXX using width as height
-                $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if map_x_y($x, $y) eq 'X'; # XXX using width as height; but tiles are 16 pixels
+                # $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if map_x_y($x, $y) eq 'X';
+                my $tile = map_x_y($x, $y);
+                if( $tile ne ' ' ) {
+                    my $icon;
+                    $icon = $brick if $tile eq 'X';
+                    $icon = $questionbox if $tile eq '?';
+                    $icon = $emptybox if $tile eq '.';
+                    SDL::Video::blit_surface(
+                        $icon,     SDL::Rect->new(0, 0, 16, 16,),
+                        $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
+                    );
+                }
             }
         }
 
@@ -884,14 +911,14 @@ $Devel::Trace::TRACE = 1;
             "Mario is DEAD", 0xFF0000FF
         ) if $quit;
 
+        $app->update();
     }
+
 );
 
 #
 # render objects
 #
-
-$app->add_show_handler( sub { $app->update(); } );
 
 $app->run();
 
@@ -2638,9 +2665,16 @@ warn ">>$a<< Player_YVel = $Player_YVel Level_DoBumpBlocks " . (qw/Level_Tile_He
     # $tile_properties{ $a }->{hittable} ...
     if( $a eq 'X' and $Player_YVel < 0 and ( $x == 0 or $x == 1 ) ) {
         (my $x, my $y ) = @{ $Level_Tile_Positions->[ $x + 1 ] };
-        $x >>= 4;
+        $x >>= 4;   # go from pixel position to block position
         $y >>= 4;
         $map->[$x]->[$y] = ' '; 
+    }
+    if( $a eq '?' and $Player_YVel < 0 and ( $x == 0 or $x == 1 ) ) {
+        (my $x, my $y ) = @{ $Level_Tile_Positions->[ $x + 1 ] };
+        $x >>= 4;   # go from pixel position to block position
+        $y >>= 4;
+# XXXX spit out a powerup
+        $map->[$x]->[$y] = '.'; 
     }
 }
 
