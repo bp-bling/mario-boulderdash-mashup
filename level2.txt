@@ -1,0 +1,30 @@
+X             W*#############*W        X
+X             W*#############*W        X
+X             W*#############*W        X
+X             W***************W        X
+X             WW*************WW        X
+X              WW           WW         X
+X               WW         WW          X
+X                WW       WW           X
+X                 WW     WW            X
+X                  WW   WW        *    X
+X    #              WW WW        ***   X
+X  X###X             WWW        *****  X
+X  X###X              W       WWW***WWWX
+X  X###X              W        WWW*WWW X
+X  X###X              W         WWWWW  X
+X  X###X              W          WWW   X
+X  X###X              W           W    X
+X  XXXXX  ?           X           X    X
+X                                      X
+X                                      X
+X                                      X
+X                                      X
+XXX    XXXXXX    XXXXXXXXXXXX  XXXXXXXXX
+X                                      X
+X                                      X
+X                                      X
+XXXXXXXXXXXXX    XXXXXXXXXXXXXXXXXXXXXXX
+X                       X              X
+X                       X              X
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX

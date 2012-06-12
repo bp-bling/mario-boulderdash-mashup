@@ -7,15 +7,15 @@ X              DD           DD         X
 X               DD         DD          X
 X                DD       DD           X
 X                 DD     DD            X
-X                  DD   DD             X
-X                   DD DD              X
-X                    DDD               X
-X                     D                X
-X                     D                X
-X                     D                X
-X                     D                X
-X                     D                X
-X         ?           X           X    X
+X                  DD   DD        *    X
+X    #              DD DD        ***   X
+X  X###X             DDD        *****  X
+X  X###X              D       WWW***WWWX
+X  X###X              D        WWW*WWW X
+X  X###X              D         WWWWW  X
+X  X###X              D          WWW   X
+X  X###X              D           W    X
+X  XXXXX  ?           X           X    X
 X                                      X
 X                                      X
 X                                      X
