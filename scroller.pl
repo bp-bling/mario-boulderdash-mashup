@@ -5,6 +5,7 @@ use warnings;
 
 TODO:
 
+o. digging; when pushing down while dirt is below, dig
 o. firefly
 o. FSA enemies!  turtles?  ugh, the whole shell bounce thing.  goombas?
 o. portals!
@@ -96,8 +97,8 @@ my %tile_properties = (
     'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # brick
     '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # questionbox
     '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # emptybox
-    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 1, }, # sand
-    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 1, }, # falling sand
+    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # sand
+    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # falling sand
     '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, diggable => 0, }, # rock/boulder 
     '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # rock/falling boulder
     'D' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # dirt
@@ -987,7 +988,7 @@ sub Boulderdash {
     my $xydir = sub { return ( $_[0] + $DIRX->[$_[2]], $_[1] + $DIRY->[$_[2]] ) };
     my $xydirmap = sub :lvalue { my ($x, $y) = $xydir->(@_); $map->[$x]->[$y]; };
 
-    # my $isempty = sub { $xydirmap->(@_) eq ' ' and ( $_[0] != $player_x and $_[1] != $player_y); };
+    # my $isempty = sub { $xydirmap->(@_) eq ' ' and ( $_[0] != $player_x and $_[1] != $player_y); }; # this mucks things up
     my $isempty = sub { $xydirmap->(@_) eq ' ' };
     my $isdirt = sub { $xydirmap->(@_) eq '~'; };
     my $isboulder = sub { $xydirmap->(@_) eq '*'; };
@@ -1001,6 +1002,7 @@ sub Boulderdash {
     my $make_rigid_unit = sub {
         my( $uc, $lc ) = @_;
         my @rigid;
+        my %did; # XXXX
         sub {
             my( $x, $y ) = @_;
             return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;  # use previous results
@@ -1008,7 +1010,9 @@ sub Boulderdash {
             my $recurse;  $recurse = sub {
                 my( $x, $y, ) = @_;
                 return unless $map->[$x]->[$y] eq $uc or $map->[$x]->[$y] eq $lc;
-                return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;
+                # return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;
+                return if exists $did{$x, $y};
+                $did{$x, $y}++; #  XXXX
                 push @rigid, [ $x, $y ];
                 $map->[$x]->[$y] = $lc; # change it back if we aren't falling; just don't recurse back into ourself
                 $recurse->( $xydir->($x, $y, DOWN) );
@@ -1018,16 +1022,32 @@ sub Boulderdash {
             };
             $recurse->( $x, $y );
             my $supported = 0;  # until shown otherwise
-            for my $i ( 0 .. $map_max_x-1 ) {
-                my @rigid_this_column = grep $_->[0] == $x, @rigid;
-                (my $bottom_bit_of_rigid) = sort { $main::b->[1] <=> $main::a->[1] } @rigid_this_column;
-                $supported = 1 if ! $isempty->($bottom_bit_of_rigid->[0], $bottom_bit_of_rigid->[1], DOWN);
+            # faster but only checks the bottommost tile in the chunk
+            # for my $i ( 0 .. $map_max_x-1 ) {
+            #     my @rigid_this_column = grep $_->[0] == $x, @rigid;
+            #     (my $bottom_bit_of_rigid) = sort { $main::b->[0] <=> $main::a->[0] } @rigid_this_column;  # sort by X 
+            #     $supported = 1 if ! $isempty->($bottom_bit_of_rigid->[0], $bottom_bit_of_rigid->[1], DOWN);
+            # }
+            for my $tile ( @rigid ) {
+                my $icon = $xydirmap->($tile->[0], $tile->[1], DOWN) ;
+                if( $icon ne 'D' and $icon ne ' ' ) {
+                    $supported = 1;  last;
+                }
             }
             if( $supported ) {
                 for my $xy ( @rigid ) { 
                     $map->[ $xy->[0] ]->[ $xy->[1] ] = $uc;  
                 }
             } else {
+
+                # for my $xy ( @rigid ) { $map->[ $xy->[0] ]->[ $xy->[1] ] = '.';  } # XXX debug
+                # XXXXXX debug
+                # for my $i ( 0 .. $map_max_x-1 ) {
+                #     my @rigid_this_column = grep $_->[0] == $x, @rigid;
+                #     (my $bottom_bit_of_rigid) = sort { $main::b->[0] <=> $main::a->[0] } @rigid_this_column;
+                #     $xydirmap->( $bottom_bit_of_rigid->[0], $bottom_bit_of_rigid->[1] ) = '.';
+                # }
+
                 @rigid = ();  # clear the cache
             }
         };
@@ -1090,8 +1110,9 @@ sub Boulderdash {
                     $map->[$x]->[$y] = '=';
                 } elsif ($xydirmap->($x, $y, DOWN) eq 'M') {
                     $xydirmap->($x, $y, DOWN) = '=';
-                    $map->[$x]->[$y] = ' ';
-                    $Player_Y -= (1<<4)<<4;  # don't smooshed mario
+                    $map->[$x]->[$y] = 'M';
+                    $player_x = $x;  $player_y = $y;
+                    $Player_Y = ($player_y << 4 ) << 4; # $Player_Y -= (1<<4)<<4;  # don't smooshed mario
                 } elsif ( $isempty->($x, $y, LEFT) && $isempty->($x, $y, DOWNLEFT)) {
                     $map->[$x]->[$y] = ' ';
                     $xydirmap->( $x, $y, DOWNLEFT ) = '=';
@@ -1139,9 +1160,6 @@ sub Boulderdash {
             # dirt 
 
             if( $tile eq 'D' ) {
-                #if ( $isempty->($x, $y, DOWN) and $isempty->($x, $y, DOWNLEFT ) and $isempty->($x, $y, DOWNRIGHT ) ) {
-                #    $map->[$x]->[$y] = 'd';
-                #}
                 $dirt_rigid_unit->($x, $y);
             }
 
@@ -1185,6 +1203,14 @@ sub Boulderdash {
 
     if( $tile_properties{ $map->[ $player_x ]->[ $player_y ] }->{diggable} ) {
         $map->[$player_x]->[$player_y] = ' '; # XXX improve
+    }
+
+    if( $xydirmap->($player_x, $player_y, DOWN) eq 'D' and $Pad_Holding & $PAD_DOWN ) {
+        $xydirmap->($player_x, $player_y, DOWN) = ' ';        
+    }
+
+    if( $map->[$player_x]->[$player_y] eq '#' ) {
+        $map->[$player_x]->[$player_y] = 'M';
     }
 
     $map->[$player_x]->[$player_y] = ' ' if $map->[$player_x]->[$player_y] eq 'M'; # undo marking where mario is
@@ -1343,7 +1369,7 @@ sub Player_Control {
         # $Player_X = $a;    # Player_X += 1
         # goto PRG008_A7AD if ! $carry; # not needed
         # $Player_XHi++;       # Otherwise, apply carry    # combine both of these into one variable?  yes.  this is not needed.
-        $Player_X += (1 << 4); # sdw
+        # $Player_X += (1 << 4); # sdw XXXXX temp disabling this; don't like how it interacts with sand.  does work though.
 
       PRG008_A7AD:
 
