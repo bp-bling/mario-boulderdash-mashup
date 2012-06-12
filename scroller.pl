@@ -5,12 +5,11 @@ use warnings;
 
 TODO:
 
-o. digging; when pushing down while dirt is below, dig
-o. firefly
-o. FSA enemies!  turtles?  ugh, the whole shell bounce thing.  goombas?
 o. portals!
+o. win condition
 o. pushing single boulders
 o. should be able to jump up to under rocks
+o. FSA enemies!  turtles?  ugh, the whole shell bounce thing.  goombas?
 o. mario/enemy collision logic
 o. mario stomping on stuff?
 o. Player_Draw
@@ -20,6 +19,18 @@ o. Player_DoGameplay -- stole a few tidbits from it but should copy the whole ro
 o. barrels and ladders from the original Mario Brothers?  resurrect vine logic?
 o. could make good use of water tiles if we pulled in the needed code; puzzles could involve filling chimneys with water
 o. use SMB3 mario draw routines so that he's doing the right frames and animations
+
+TILES:
+
+../background.gif
+../javascript-boulderdash/images/sprites.png
+
+LEVELS:
+
+o. dirt maze that's one big elaborate shape
+o. sand pushing mario up a chimney
+o. trying to navigate dirt and boulders
+o. dropping boulders on enemies
 
 =cut
 
@@ -78,6 +89,44 @@ $sprite->set_sequences(
 $sprite->sequence('stopr');
 $sprite->start();
 
+#
+
+my $fireflysprite = SDLx::Sprite::Animated->new(
+    image           => 'boulderdashsprites.png',
+    rect            => SDL::Rect->new( 0, 0, 16, 16 ),
+    ticks_per_frame => 6,
+    # alpha_key       => SDL::Color->new(0, 255, 255), # XXX transparent in the png working?
+);
+$fireflysprite->set_sequences(
+    firefly => [ [ 0, 9 ], [ 1, 9 ], [ 2, 9 ], [ 3, 9 ], [ 4, 9 ], [ 5, 9 ], [ 6, 9 ], [ 7, 9 ] ],
+);
+$fireflysprite->sequence('firefly');
+$fireflysprite->start();
+
+my $explodetospace = SDLx::Sprite::Animated->new(
+    image           => 'boulderdashsprites.png',
+    rect            => SDL::Rect->new( 0, 0, 16, 16 ),
+    ticks_per_frame => 6,
+);
+$explodetospace->set_sequences(
+    explodetospace => [ [ 4, 7 ], [ 5, 7 ], [ 4, 7 ], [ 3, 7 ] ],
+);
+$explodetospace->sequence('explodetospace');
+$explodetospace->start();
+
+
+#    explodetodiamond => [ [ 3, 7 ], [ 4, 7 ], [ 5, 7 ], [ 4, 7 ], [ 3, 7 ] ], # XXX
+
+use constant { UP => 0, UPRIGHT => 1, RIGHT => 2, DOWNRIGHT => 3, DOWN => 4, DOWNLEFT => 5, LEFT => 6, UPLEFT => 7, };
+my $DIRX = [     0,          1,        1,            1,            0,          -1,          -1,        -1 ];
+my $DIRY = [    -1,         -1,        0,            1,            1,           1,           0,        -1 ];
+
+my $FIREFLIES = [];
+$FIREFLIES->[LEFT]  = 'F1'; # OBJECT.FIREFLY1
+$FIREFLIES->[UP]    = 'F2'; # OBJECT.FIREFLY2;
+$FIREFLIES->[RIGHT] = 'F3'; # OBJECT.FIREFLY3;
+$FIREFLIES->[DOWN]  = 'F4'; # OBJECT.FIREFLY4;
+ 
 # hacked up:
 
 my $deadmario = SDL::Image::load( 'deadmario.gif' ) or die;
@@ -90,22 +139,52 @@ my $rock = SDL::Image::load( 'rock.gif' ) or die; # XXX combine with tile consta
 my $dirt = SDL::Image::load( 'dirt.gif' ) or die; # XXX combine with tile constants somehow
 my $woodblock = SDL::Image::load( 'woodblock.gif' ) or die; # XXX combine with tile constants somehow
 
+my $icon_lookup = {
+   X => $brick,
+   '?' => $questionbox,
+   '.' => $emptybox,
+   '#' => $sand,
+   '=' => $sand,
+   '*' => $rock,
+   '@' => $rock,
+   'D' => $dirt,
+   'd' => $dirt,
+   'W' => $woodblock,
+   'w' => $woodblock,
+   'M' => $emptybox, # XXX debug -- mario; shouldn't be left here unless we're trying to debug
+};
+
 my %tile_properties = (
     # solid bottom and solid sides are the same thing
     # XXX reconsile this with the TILE constants
-    ' ' => { solid_top => 0, solid_bottom => 0, rounded => 1, explodable => 0, consumable => 0, diggable => 0, },
-    'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # brick
+    ' ' => { solid_top => 0, solid_bottom => 0, rounded => 1, explodable => 0, consumable => 1, diggable => 0, },
+    'X' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # brick
     '?' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # questionbox
     '.' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # emptybox
-    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # sand
-    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # falling sand
+    '#' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # sand
+    '=' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # falling sand
     '*' => { solid_top => 1, solid_bottom => 1, rounded => 1, explodable => 0, consumable => 1, diggable => 0, }, # rock/boulder 
     '@' => { solid_top => 1, solid_bottom => 1, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # rock/falling boulder
     'D' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # dirt
     'd' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # falling dirt
     'W' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # woodblock
     'w' => { solid_top => 1, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 1, }, # falling woodblock
-    'M' => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # XXX debug -- mario
+    'M' => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 1, diggable => 0, }, # XXX debug -- mario
+    F1  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 1, consumable => 1, diggable => 0, }, # firefly
+    F2  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 1, consumable => 1, diggable => 0, }, # firefly
+    F3  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 1, consumable => 1, diggable => 0, }, # firefly
+    F4  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 1, consumable => 1, diggable => 0, }, # firefly
+    E1  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # explosion
+    E2  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # explosion
+    E3  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # explosion
+    E4  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # explosion
+    E5  => { solid_top => 0, solid_bottom => 0, rounded => 0, explodable => 0, consumable => 0, diggable => 0, }, # explosion
+    # EXPLODETODIAMOND0: { code: 0x20, rounded: false, explodable: false, consumable: false, sprite: { x: 3, y: 7                 } },
+    # EXPLODETODIAMOND1: { code: 0x21, rounded: false, explodable: false, consumable: false, sprite: { x: 4, y: 7                 } },
+    # EXPLODETODIAMOND2: { code: 0x22, rounded: false, explodable: false, consumable: false, sprite: { x: 5, y: 7                 } },
+    # EXPLODETODIAMOND3: { code: 0x23, rounded: false, explodable: false, consumable: false, sprite: { x: 4, y: 7                 } },
+    # EXPLODETODIAMOND4: { code: 0x24, rounded: false, explodable: false, consumable: false, sprite: { x: 3, y: 7                 } },
+
 );
 
 
@@ -132,9 +211,11 @@ do {
     open my $fh, '<', $fn or die "$fn: $!";
     my $y = 0;
     while( my $line = readline $fh ) {
+        chomp $line;
         my @line = split m//, $line;
         for my $x ( 0 .. $#line ) {
             $map->[$x]->[$y] = $line[$x];
+            $map->[$x]->[$y] .= '1' if ! exists $tile_properties{ $map->[$x]->[$y] }; # deal with things like A1, A2, A3, A4 all being keyed off 'A' in the map .txt
             $map_max_x = $x if $x > $map_max_x;
         }
         $y++; 
@@ -158,7 +239,6 @@ my $PLAYER_TOPRUNSPEED    = 0x28;         # Highest X velocity when Player runs
 my $PLAYER_TOPPOWERSPEED  = 0x38;         # Highest X velocity hit when Player is at full "power"
 my $PLAYER_JUMP           = - 0x38;       # Player's root Y velocity for jumping (further adjusted a bit by Player_SpeedJumpInc)
 my $PLAYER_MAXSPEED       = 0x40;         # Player's maximum speed
-
 
 # Player_Suit -- Player's active powerup (see also: Player_QueueSuit)
 my $PLAYERSUIT_SMALL    = 0; 
@@ -855,7 +935,7 @@ $Devel::Trace::TRACE = 1;
 #            }
 #        }
 
-        if ( ($Player_Y>>4) + 10 > $app->h ) {
+        if ( $Player_Y > 0 and ($Player_Y>>4) + 10 > $app->h ) {
             # fell off of the world
             warn "player fell off of the world";
             $quit = 1;
@@ -893,23 +973,26 @@ $Devel::Trace::TRACE = 1;
                 # $app->draw_rect( [ $x * $w, $y * $w, $w, $w ], 0xFF0000FF ) if map_x_y($x, $y) eq 'X';
                 my $tile = map_x_y($x, $y);
                 if( $tile ne ' ' ) {
-                    my $icon;
-                    $icon = $brick if $tile eq 'X';
-                    $icon = $questionbox if $tile eq '?';
-                    $icon = $emptybox if $tile eq '.';
-                    $icon = $sand if $tile eq '#';
-                    $icon = $sand if $tile eq '=';
-                    $icon = $rock if $tile eq '*';
-                    $icon = $rock if $tile eq '@';
-                    $icon = $dirt if $tile eq 'D';
-                    $icon = $dirt if $tile eq 'd';
-                    $icon = $woodblock if $tile eq 'W';
-                    $icon = $woodblock if $tile eq 'w';
-                    $icon = $emptybox if $tile eq 'M'; # XXX debug -- mario 
-                    SDL::Video::blit_surface(
-                        $icon,     SDL::Rect->new(0, 0, 16, 16,),
-                        $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
-                    );
+                    my $icon = $icon_lookup->{$tile};
+                    if( $icon ) {
+                        SDL::Video::blit_surface(
+                            $icon,     SDL::Rect->new(0, 0, 16, 16,),
+                            $app,      SDL::Rect->new($x<<4, $y<<4, 16, 16),
+                        );
+                    } else {
+                        # alright, it's one of the sprites, then
+                        my $sprite;
+                        $sprite = $fireflysprite if grep $tile eq $_, 'F1', 'F2', 'F3', 'F4';
+                        $sprite = $explodetospace if grep $tile eq $_, 'E1', 'E2', 'E3', 'E4', 'E5';
+                        if( $sprite ) {
+                            $sprite->x( $x << 4 );
+                            $sprite->y( $y << 4 );
+                            $sprite->draw($app->surface);
+                        } else {
+                            # else I don't know what
+                            warn "unknown tile: ``$tile''";
+                        }
+                    }
                 }
             }
         }
@@ -963,10 +1046,6 @@ $Devel::Trace::TRACE = 1;
 #
 #}
 
-use constant { UP => 0, UPRIGHT => 1, RIGHT => 2, DOWNRIGHT => 3, DOWN => 4, DOWNLEFT => 5, LEFT => 6, UPLEFT => 7, };
-my $DIRX = [     0,          1,        1,            1,            0,          -1,          -1,        -1 ];
-my $DIRY = [    -1,         -1,        0,            1,            1,           1,           0,        -1 ];
-
 sub Boulderdash {
 
     #
@@ -992,35 +1071,66 @@ sub Boulderdash {
     my $isempty = sub { $xydirmap->(@_) eq ' ' };
     my $isdirt = sub { $xydirmap->(@_) eq '~'; };
     my $isboulder = sub { $xydirmap->(@_) eq '*'; };
-    # my $isrockford = sub { my ($p, $dir) = @_; return this.get(p,dir) === OBJECT.ROCKFORD; }, # XXXXXXXX
+    # my $isrockford = sub { $xydirmap->(@_) eq 'M'; }, # XXX
+    my $isrockford = sub { $xydirmap->(@_) eq 'M'; }, # XXXXXX
     my $isdiamond = sub { $xydirmap->(@_) eq 'v'; };
 
     my $isexplodable = sub { $tile_properties{ $xydirmap->(@_) }->{explodable}; };
     my $isconsumable = sub { $tile_properties{ $xydirmap->(@_) }->{consumable}; };  # consumable by an explosion
     my $isrounded = sub { $tile_properties{ $xydirmap->(@_) }->{rounded}; };  # consumable by an explosion
 
+    my $rotateLeft = sub { my $dir = shift; return( ($dir-2) + ($dir < 2 ? 8 : 0) ); };
+    my $rotateRight = sub { my $dir = shift; return( ($dir+2) - ($dir > 5 ? 8 : 0) ); };
+    my $horizontal = sub { my $dir = shift; return( ($dir == LEFT) || ($dir == RIGHT) ); };
+    my $vertical = sub { my $dir = shift; return( ($dir == UP)   || ($dir == DOWN) ); };
+
+    my $explode; $explode = sub {
+        my( $x, $y, $basedir ) = @_;
+        ($x, $y) = $xydir->($x, $y, $basedir);
+        # var explosion = (this.isbutterfly(p2) ? OBJECT.EXPLODETODIAMOND0 : OBJECT.EXPLODETOSPACE0); # XXX
+        my $explosion = 'E1';
+        $map->[$x]->[$y] = $explosion;
+        for(my $dir = 0 ; $dir < 8 ; ++$dir) { # for each of the 8 directions
+          if ( $tile_properties{ $xydirmap->( $x, $y, $dir ) }->{explodable} ) {
+            $explode->($x, $y, $dir);
+          } elsif ( $tile_properties{ $xydirmap->( $x, $y, $dir ) }->{consumable} ) {
+            $quit = 1 if $isrockford->( $x, $y, $dir );
+            $xydirmap->( $x, $y, $dir ) = $explosion;
+          }
+        }
+    };
+
     my $make_rigid_unit = sub {
         my( $uc, $lc ) = @_;
         my @rigid;
-        my %did; # XXXX
+        my $block_count;  # if we find too many blocks, abort checking
+        my $disable;
+        my %did;
         sub {
             my( $x, $y ) = @_;
-            return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;  # use previous results
+warn "disable" if $disable;
+            return if $disable;
+            return if exists $did{$x, $y};  #  use the cache; enable this one or the one below
+            # return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;  # use the cache; enable this one or the one above; if this block is part of a larger structure we looked at this same frame, don't do it again
             @rigid = ();
             my $recurse;  $recurse = sub {
-                my( $x, $y, ) = @_;
-                return unless $map->[$x]->[$y] eq $uc or $map->[$x]->[$y] eq $lc;
-                # return if grep { $_->[0] == $x and $_->[1] == $y } @rigid;
-                return if exists $did{$x, $y};
-                $did{$x, $y}++; #  XXXX
+                my( $x, $y ) = @_;
+                return if $disable;
+                return unless $map->[$x]->[$y] eq $uc; # or $map->[$x]->[$y] eq $lc;
+                # return if grep { $_->[0] == $x and $_->[1] == $y } @rigid; # don't recurse into stuff we did; this one of the next one; not necessary as we make the tile lowercase
+                # return if exists $did{$x, $y};  $did{$x, $y}++; # don't recurse into stuff we already did; enable this one or the one above; not needed as we make the tile lowercase
+                $did{$x, $y}++; # keep track of which tiles we looked at this frame so we don't compute the same structure twice the same frame; return not needed as we make the tile lowercase
                 push @rigid, [ $x, $y ];
-                $map->[$x]->[$y] = $lc; # change it back if we aren't falling; just don't recurse back into ourself
-                $recurse->( $xydir->($x, $y, DOWN) );
-                $recurse->( $xydir->($x, $y, UP) );
-                $recurse->( $xydir->($x, $y, LEFT) );
-                $recurse->( $xydir->($x, $y, RIGHT) );
+                $map->[$x]->[$y] = $lc; # we later change it back if we aren't falling; just don't recurse back into ourself
+                # $map->[$x]->[$y] = '.'; # we later change it back if we aren't falling; just don't recurse back into ourself; debug
+                $block_count++;  $disable = 1 if $block_count > 95; # XXXX
+                $recurse->( $xydir->($x, $y, DOWN) )  if $xydirmap->($x, $y, DOWN) eq $uc;
+                $recurse->( $xydir->($x, $y, UP) )    if $xydirmap->($x, $y, UP) eq $uc; 
+                $recurse->( $xydir->($x, $y, LEFT) )  if $xydirmap->($x, $y, LEFT) eq $uc;
+                $recurse->( $xydir->($x, $y, RIGHT) ) if  $xydirmap->($x, $y, RIGHT) eq $uc;
             };
             $recurse->( $x, $y );
+            $block_count = 0;
             my $supported = 0;  # until shown otherwise
             # faster but only checks the bottommost tile in the chunk
             # for my $i ( 0 .. $map_max_x-1 ) {
@@ -1030,7 +1140,9 @@ sub Boulderdash {
             # }
             for my $tile ( @rigid ) {
                 my $icon = $xydirmap->($tile->[0], $tile->[1], DOWN) ;
-                if( $icon ne 'D' and $icon ne ' ' ) {
+                if( $icon ne 'D' and $icon ne 'd' and $icon ne ' ' ) {
+                    # if( our $counter++ > 300 ) { $xydirmap->($tile->[0], $tile->[1], DOWN) = '.'; }; # XXX debug
+# warn "supported at one down from $tile->[0], $tile->[1]";
                     $supported = 1;  last;
                 }
             }
@@ -1039,6 +1151,7 @@ sub Boulderdash {
                     $map->[ $xy->[0] ]->[ $xy->[1] ] = $uc;  
                 }
             } else {
+# warn "NOT supported";
 
                 # for my $xy ( @rigid ) { $map->[ $xy->[0] ]->[ $xy->[1] ] = '.';  } # XXX debug
                 # XXXXXX debug
@@ -1048,14 +1161,15 @@ sub Boulderdash {
                 #     $xydirmap->( $bottom_bit_of_rigid->[0], $bottom_bit_of_rigid->[1] ) = '.';
                 # }
 
-                @rigid = ();  # clear the cache
             }
+            @rigid = ();
         };
     };
     my $dirt_rigid_unit = $make_rigid_unit->('D', 'd');
     my $wood_rigid_unit = $make_rigid_unit->('W', 'w');
 
-    $map->[$player_x]->[$player_y] = 'M' if $map->[$player_x]->[$player_y] eq ' '; # so that isempty will come back false
+    $map->[$player_x]->[$player_y] = 'M' if $map->[$player_x]->[$player_y] eq ' '; # so that isempty will come back false XXXXXXXXXXXXXXX highly experimental... okay, mucks up digging; probably fixable
+    # my $player_tile_save = $map->[$player_x]->[$player_y]; $map->[$player_x]->[$player_y] = 'M';
 
     # for(my $y = 0 ; $y < $map_max_y ; ++$y) {  # XXX
     for my $y ( reverse 0 .. $map_max_y-1 ) {
@@ -1082,6 +1196,9 @@ sub Boulderdash {
             if( $tile eq '@' ) {
                 if ($isempty->($x, $y, DOWN)) {
                     $xydirmap->($x, $y, DOWN) = '@';
+                    $map->[$x]->[$y] = ' ';
+                } elsif ($xydirmap->($x, $y, DOWN) eq 'X') {
+                    $xydirmap->($x, $y, DOWN) = '*';
                     $map->[$x]->[$y] = ' ';
                 } elsif ($xydirmap->($x, $y, DOWN) eq 'M') {
                     $xydirmap->($x, $y, DOWN) = '@';
@@ -1198,6 +1315,42 @@ sub Boulderdash {
                 }
             }
 
+            # fireflies
+
+            if( grep $tile eq $_, 'F1', 'F2', 'F3', 'F4' ) {
+                my $dir = { F1 => LEFT, F2 => UP, F3 => RIGHT, F4 => DOWN }->{ $tile };
+                my $newdir = $rotateLeft->($dir);  defined $newdir or die;
+                if ($isrockford->($x, $y, UP) || $isrockford->($x, $y, DOWN) || $isrockford->($x, $y, LEFT) || $isrockford->($x, $y, RIGHT)) {
+                    $explode->($x, $y);
+                # else if (this.isamoeba(p, DIR.UP) || this.isamoeba(p, DIR.DOWN) || this.isamoeba(p, DIR.LEFT) || this.isamoeba(p, DIR.RIGHT))
+                #  this.explode(p);
+                } elsif ($isempty->($x, $y, $newdir)) {
+                    # this.move(p, newdir, FIREFLIES[newdir]);
+                    my $firefly = $FIREFLIES->[ $newdir ];  defined $firefly or die or die;
+                    $xydirmap->($x, $y, $newdir) = $firefly;
+                    $map->[$x]->[$y] = ' ';
+                } elsif ($isempty->($x, $y, $dir)) {
+                    # this.move(p, dir, FIREFLIES[dir]);
+                    my $firefly = $FIREFLIES->[ $dir ]; defined $firefly or die;
+                    $xydirmap->($x, $y, $dir) = $firefly;
+                    $map->[$x]->[$y] = ' ';
+                } else {
+                    # this.set(p, FIREFLIES[rotateRight(dir)]);
+                    my $firefly = $FIREFLIES->[ $rotateRight->($dir) ]; defined $firefly or die;
+                    $map->[$x]->[$y] = $firefly;
+                }
+            }
+
+            if( $tile eq 'E1' ) {
+                $map->[$x]->[$y] = 'E2';
+            } elsif ( $tile eq 'E2' ) {
+                $map->[$x]->[$y] = 'E3';
+            } elsif ( $tile eq 'E3' ) {
+                $map->[$x]->[$y] = 'E4';
+            } elsif ( $tile eq 'E4' ) {
+                $map->[$x]->[$y] = ' ';
+            }
+
         }
     }
 
@@ -1213,7 +1366,8 @@ sub Boulderdash {
         $map->[$player_x]->[$player_y] = 'M';
     }
 
-    $map->[$player_x]->[$player_y] = ' ' if $map->[$player_x]->[$player_y] eq 'M'; # undo marking where mario is
+    $map->[$player_x]->[$player_y] = ' ' if $map->[$player_x]->[$player_y] eq 'M'; # undo marking where mario is XXXX
+    # $map->[$player_x]->[$player_y] = $player_tile_save; # highly experimental... 
 
 }
 
